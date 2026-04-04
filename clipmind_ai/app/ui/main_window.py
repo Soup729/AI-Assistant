@@ -1,7 +1,8 @@
 import sys
+from typing import Any, Iterable
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -15,8 +16,33 @@ from PySide6.QtWidgets import (
 )
 
 
+class DraggableTitleBar(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_offset = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+            self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     request_exit_signal = Signal()
+    model_changed_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -24,9 +50,8 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowOpacity(0.95)
-        self.setMinimumSize(450, 620)
+        self.setMinimumSize(450, 660)
 
-        self._drag_origin = None
         self._init_ui()
         self._setup_style()
 
@@ -39,13 +64,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(10)
 
-        self.title_bar = QFrame()
+        self.title_bar = DraggableTitleBar()
         self.title_bar.setObjectName("titleBar")
         title_layout = QHBoxLayout(self.title_bar)
         title_layout.setContentsMargins(10, 5, 10, 5)
 
         self.title_label = QLabel("ClipMind AI")
         self.title_label.setObjectName("titleLabel")
+        self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self.btn_settings = QPushButton("⚙")
         self.btn_settings.setFixedSize(28, 28)
@@ -60,6 +86,15 @@ class MainWindow(QMainWindow):
         title_layout.addStretch()
         title_layout.addWidget(self.btn_settings)
         title_layout.addWidget(self.btn_close)
+
+        self.model_label = QLabel("当前模型")
+        self.model_label.setObjectName("sectionLabel")
+
+        self.combo_model = QComboBox()
+        self.combo_model.setObjectName("comboModel")
+        self.combo_model.setFixedHeight(32)
+        self.combo_model.setToolTip("切换当前启用的模型")
+        self.combo_model.currentIndexChanged.connect(self._emit_model_changed)
 
         self.combo_template = QComboBox()
         self.combo_template.setObjectName("comboTemplate")
@@ -97,6 +132,8 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_send)
 
         layout.addWidget(self.title_bar)
+        layout.addWidget(self.model_label)
+        layout.addWidget(self.combo_model)
         layout.addWidget(self.combo_template)
         layout.addWidget(self.ocr_status_label)
         layout.addWidget(self.response_status_label)
@@ -122,6 +159,12 @@ class MainWindow(QMainWindow):
                 font-size: 16px;
                 color: #333333;
                 font-family: "Segoe UI", "Microsoft YaHei";
+            }
+            #sectionLabel {
+                color: #444444;
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 2px;
             }
             #btnTitle, #btnClose {
                 border: none;
@@ -192,25 +235,74 @@ class MainWindow(QMainWindow):
             """
         )
 
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self._drag_origin = event.globalPosition().toPoint()
+    def _emit_model_changed(self, index: int):
+        model_id = self.combo_model.itemData(index)
+        if model_id:
+            self.model_changed_signal.emit(str(model_id))
 
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if self._drag_origin is not None:
-            delta = QPoint(event.globalPosition().toPoint() - self._drag_origin)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self._drag_origin = event.globalPosition().toPoint()
+    def _model_label(self, profile: Any) -> str:
+        display_name = getattr(profile, "display_name", "") or ""
+        model_name = getattr(profile, "model_name", "") or ""
+        if display_name and model_name and display_name != model_name:
+            return f"{display_name} ({model_name})"
+        return display_name or model_name or "未命名模型"
 
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        self._drag_origin = None
+    def _model_tooltip(self, profile: Any) -> str:
+        api_base_url = getattr(profile, "api_base_url", "") or ""
+        model_name = getattr(profile, "model_name", "") or ""
+        temperature = getattr(profile, "temperature", "")
+        max_tokens = getattr(profile, "max_tokens", "")
+        return (
+            f"Base URL: {api_base_url}\n"
+            f"Model: {model_name}\n"
+            f"Temperature: {temperature}\n"
+            f"Max Tokens: {max_tokens}"
+        )
+
+    def set_model_profiles(self, profiles: Iterable[Any], active_model_id: str = ""):
+        self.combo_model.blockSignals(True)
+        self.combo_model.clear()
+
+        profiles = list(profiles)
+        if not profiles:
+            self.combo_model.addItem("未配置模型", "")
+            self.combo_model.setEnabled(False)
+            self.combo_model.blockSignals(False)
+            return
+
+        self.combo_model.setEnabled(True)
+        for profile in profiles:
+            model_id = getattr(profile, "id", "") or ""
+            label = self._model_label(profile)
+            index = self.combo_model.count()
+            self.combo_model.addItem(label, model_id)
+            self.combo_model.setItemData(index, self._model_tooltip(profile), Qt.ToolTipRole)
+
+        target_index = self.combo_model.findData(active_model_id) if active_model_id else -1
+        if target_index < 0:
+            target_index = 0
+        self.combo_model.setCurrentIndex(target_index)
+        self.combo_model.blockSignals(False)
 
     def append_output(self, text: str):
-        self.output_text.insertPlainText(text)
+        cursor = self.output_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(text)
+        self.output_text.setTextCursor(cursor)
         self.output_text.ensureCursorVisible()
 
     def set_input(self, text: str):
         self.input_text.setPlainText(text)
+        self.input_text.moveCursor(QTextCursor.End)
+        self.show()
+        self.activateWindow()
+
+    def append_input(self, text: str):
+        cursor = self.input_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(text)
+        self.input_text.setTextCursor(cursor)
+        self.input_text.ensureCursorVisible()
         self.show()
         self.activateWindow()
 

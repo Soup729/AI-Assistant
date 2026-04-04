@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import collect_all
 
 try:
     project_root = Path(__file__).resolve().parent
@@ -11,25 +11,14 @@ package_root = project_root / 'clipmind_ai'
 
 datas = [(str(package_root / 'assets'), 'assets')]
 binaries = []
-hiddenimports = ['win32clipboard', 'win32con', 'keyboard']
-tmp_ret = collect_all('paddleocr')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('paddle')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('paddlex')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('imagesize')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-
-for dist_name in [
-    'imagesize',
-    'opencv-contrib-python',
-    'pyclipper',
-    'pypdfium2',
-    'python-bidi',
-    'shapely',
-]:
-    datas += copy_metadata(dist_name)
+hiddenimports = ['win32clipboard', 'win32con', 'win32api', 'win32gui', 'keyboard']
+legacy_paddle_packages = ('paddle' + 'ocr', 'paddle' + 'paddle', 'paddle' + 'x')
+for package_name in ('rapidocr_onnxruntime', 'rapidocr', 'sherpa_onnx', 'pyaudiowpatch', 'onnxruntime'):
+    try:
+        tmp_ret = collect_all(package_name)
+    except Exception:
+        continue
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
@@ -41,7 +30,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['paddle'] + list(legacy_paddle_packages),
     noarchive=False,
     optimize=0,
 )

@@ -28,4 +28,4 @@ config.json
 # IDE / editor
 .idea/
 .vscode/
-
+clipmind_ai/assets/speech_models/

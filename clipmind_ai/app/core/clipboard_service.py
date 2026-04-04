@@ -1,15 +1,11 @@
 import time
-from typing import Optional
+import threading
+from contextlib import suppress
 
-import keyboard
+import win32api
 import win32clipboard
 import win32con
-
-try:
-    import win32gui
-except ImportError:  # pragma: no cover - Windows only dependency
-    win32gui = None
-
+import win32gui
 from PySide6.QtCore import QObject, Signal
 
 from app.utils.logger import logger
@@ -20,124 +16,166 @@ class ClipboardService(QObject):
 
     def __init__(self):
         super().__init__()
+        self._lock = threading.RLock()
+
+    def _open_clipboard(self, retries: int = 6, delay: float = 0.05) -> bool:
+        last_error = None
+        for _ in range(retries):
+            try:
+                win32clipboard.OpenClipboard()
+                return True
+            except Exception as exc:  # pragma: no cover - clipboard contention is environment dependent
+                last_error = exc
+                time.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        return False
+
+    def _close_clipboard(self):
+        with suppress(Exception):
+            win32clipboard.CloseClipboard()
 
     def _get_clipboard_text(self):
         """
-        直接读取剪贴板文本，避免启动外部进程。
+        使用 Win32 API 直接读取剪贴板文本。
         """
-        for _ in range(5):
-            opened = False
-            try:
-                win32clipboard.OpenClipboard()
-                opened = True
-                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                    return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-                return ""
-            except Exception:
-                time.sleep(0.1)
-            finally:
-                if opened:
+        with self._lock:
+            for _ in range(6):
+                try:
+                    self._open_clipboard()
                     try:
-                        win32clipboard.CloseClipboard()
-                    except Exception:
-                        pass
+                        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                            return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        return ""
+                    finally:
+                        self._close_clipboard()
+                except Exception:
+                    time.sleep(0.05)
         return ""
 
     def _set_clipboard_text(self, text):
         """
-        直接设置剪贴板文本。
+        使用 Win32 API 直接设置剪贴板文本。
         """
-        for _ in range(5):
-            opened = False
-            try:
-                win32clipboard.OpenClipboard()
-                opened = True
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-                return True
-            except Exception:
-                time.sleep(0.1)
-            finally:
-                if opened:
+        with self._lock:
+            for _ in range(6):
+                try:
+                    self._open_clipboard()
                     try:
-                        win32clipboard.CloseClipboard()
-                    except Exception:
-                        pass
+                        win32clipboard.EmptyClipboard()
+                        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+                        return True
+                    finally:
+                        self._close_clipboard()
+                except Exception as exc:
+                    logger.debug(f"写入剪贴板失败，准备重试: {exc}")
+                    time.sleep(0.05)
         return False
 
-    def _restore_foreground_window(self, hwnd: Optional[int]) -> bool:
-        if not hwnd or win32gui is None:
+    def _release_modifiers(self):
+        for vk in (win32con.VK_MENU, win32con.VK_CONTROL, win32con.VK_SHIFT):
+            with suppress(Exception):
+                win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def _send_ctrl_combo(self, key_code: int):
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        time.sleep(0.02)
+        win32api.keybd_event(key_code, 0, 0, 0)
+        time.sleep(0.02)
+        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.01)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def _focus_window(self, hwnd: int) -> bool:
+        if not hwnd:
             return False
 
         try:
             if not win32gui.IsWindow(hwnd):
                 return False
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            time.sleep(0.05)
-            win32gui.SetForegroundWindow(hwnd)
-            return True
-        except Exception as e:
-            logger.warning(f"恢复目标窗口失败: {e}")
+            if win32gui.GetForegroundWindow() == hwnd:
+                return True
+
+            with suppress(Exception):
+                if win32gui.IsIconic(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                else:
+                    win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            with suppress(Exception):
+                win32gui.BringWindowToTop(hwnd)
+            with suppress(Exception):
+                win32gui.SetForegroundWindow(hwnd)
+
+            time.sleep(0.03)
+            return win32gui.GetForegroundWindow() == hwnd
+        except Exception as exc:
+            logger.warning(f"恢复目标窗口焦点失败: {exc}")
             return False
 
     def read_selected_text(self):
         """
         通过模拟 Ctrl+C 读取选中文本。
         """
-        try:
+        with self._lock:
             original_content = self._get_clipboard_text()
 
-            self._set_clipboard_text("")
+            try:
+                self._release_modifiers()
+                time.sleep(0.05)
+                self._send_ctrl_combo(ord("C"))
 
-            keyboard.release("alt")
-            keyboard.release("shift")
-            keyboard.release("ctrl")
-            time.sleep(0.05)
+                selected_text = ""
+                for _ in range(8):
+                    time.sleep(0.05)
+                    selected_text = self._get_clipboard_text()
+                    if selected_text and selected_text != original_content:
+                        break
 
-            keyboard.send("ctrl+c")
+                if selected_text and selected_text.strip():
+                    logger.info(f"读取到选中文本 (长度: {len(selected_text)})")
+                    self.text_ready_signal.emit(selected_text)
+                    return selected_text
 
-            time.sleep(0.2)
+                logger.warning("未读取到任何选中文本")
+                return ""
+            except Exception as exc:
+                logger.error(f"读取选中文本时出错: {exc}")
+                return ""
+            finally:
+                self._set_clipboard_text(original_content)
 
-            selected_text = self._get_clipboard_text()
-
-            if selected_text and selected_text.strip():
-                logger.info(f"读取到选中文本 (长度: {len(selected_text)})")
-                self.text_ready_signal.emit(selected_text)
-                return selected_text
-
-            logger.warning("未读取到任何选中文本")
-            self._set_clipboard_text(original_content)
-            return ""
-
-        except Exception as e:
-            logger.error(f"读取选中文本时出错: {e}")
-            return ""
-
-    def copy_to_clipboard(self, text: str) -> bool:
-        success = self._set_clipboard_text(text)
-        if success:
+    def copy_to_clipboard(self, text: str):
+        if self._set_clipboard_text(text):
             logger.info("已成功复制到剪贴板")
-        else:
-            logger.error("复制到剪贴板失败")
-        return success
-
-    def auto_paste(self, text: str, target_hwnd: Optional[int] = None) -> bool:
-        try:
-            if not self._set_clipboard_text(text):
-                logger.error("自动回填前设置剪贴板失败")
-                return False
-
-            if not self._restore_foreground_window(target_hwnd):
-                logger.warning("未找到可回填的目标窗口")
-                return False
-
-            time.sleep(0.1)
-            keyboard.send("ctrl+v")
-            logger.info("已执行自动回填")
             return True
-        except Exception as e:
-            logger.error(f"自动回填失败: {e}")
-            return False
+
+        logger.error("复制到剪贴板失败")
+        return False
+
+    def auto_paste(self, text: str, target_hwnd: int, focus_delay_ms: int = 60, restore_delay_ms: int = 120):
+        with self._lock:
+            original_content = self._get_clipboard_text()
+
+            try:
+                if not self._set_clipboard_text(text):
+                    return False
+
+                if not self._focus_window(target_hwnd):
+                    logger.warning("未能将焦点切回目标窗口，回填已中止")
+                    return False
+
+                time.sleep(max(0, focus_delay_ms) / 1000.0)
+                self._send_ctrl_combo(ord("V"))
+                time.sleep(max(0, restore_delay_ms) / 1000.0)
+
+                logger.info("已执行自动回填")
+                return True
+            except Exception as exc:
+                logger.error(f"自动回填失败: {exc}")
+                return False
+            finally:
+                self._set_clipboard_text(original_content)
 
 
 clipboard_service = ClipboardService()

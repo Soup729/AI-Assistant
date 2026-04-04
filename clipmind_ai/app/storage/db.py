@@ -1,84 +1,16 @@
-import os
 import sqlite3
-import shutil
-import time
-import tempfile
+import os
 from pathlib import Path
+from datetime import datetime
 from typing import List, Dict, Any
 
-from app.utils.runtime_paths import APP_NAME, get_project_root, get_user_data_dir
-
 class DatabaseManager:
-    def __init__(self, db_path: str = None):
-        self.db_path = Path(db_path) if db_path else get_user_data_dir() / "app_data.db"
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._migrate_legacy_db()
-        try:
-            self._init_db()
-        except sqlite3.OperationalError as exc:
-            if "readonly database" not in str(exc).lower():
-                raise
-            self._recover_from_readonly_db()
+    def __init__(self, db_path: str = "app_data.db"):
+        self.db_path = db_path
+        self._init_db()
     
     def _get_connection(self):
         return sqlite3.connect(self.db_path)
-
-    def _migrate_legacy_db(self):
-        legacy_paths = [
-            get_project_root() / "app_data.db",
-            Path.cwd() / "app_data.db",
-        ]
-        if self.db_path.exists():
-            return
-        for legacy_db_path in legacy_paths:
-            if legacy_db_path == self.db_path or not legacy_db_path.exists():
-                continue
-            try:
-                shutil.copyfile(legacy_db_path, self.db_path)
-                try:
-                    self.db_path.chmod(0o666)
-                except OSError:
-                    pass
-                return
-            except OSError:
-                continue
-
-    def _recover_from_readonly_db(self):
-        fallback_names = [
-            f"{self.db_path.stem}_runtime_{os.getpid()}{self.db_path.suffix}",
-            f"{self.db_path.stem}_runtime_{int(time.time() * 1000)}{self.db_path.suffix}",
-            f"{self.db_path.stem}_recovered{self.db_path.suffix}",
-        ]
-        fallback_roots = [
-            self.db_path.parent,
-            Path(tempfile.gettempdir()) / APP_NAME,
-        ]
-
-        for fallback_root in fallback_roots:
-            fallback_root.mkdir(parents=True, exist_ok=True)
-            for fallback_name in fallback_names:
-                fallback_db_path = fallback_root / fallback_name
-                try:
-                    if self.db_path.exists():
-                        try:
-                            shutil.copyfile(self.db_path, fallback_db_path)
-                        except OSError:
-                            fallback_db_path.touch(exist_ok=True)
-                    else:
-                        fallback_db_path.touch(exist_ok=True)
-
-                    try:
-                        fallback_db_path.chmod(0o666)
-                    except OSError:
-                        pass
-
-                    self.db_path = fallback_db_path
-                    self._init_db()
-                    return
-                except OSError:
-                    continue
-
-        raise sqlite3.OperationalError("unable to recover writable database path")
     
     def _init_db(self):
         """初始化数据库表"""
