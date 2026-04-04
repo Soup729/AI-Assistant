@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+
+# Runtime data
+logs/
+.clipmind_data/
+app_data.db
+config.json
+*.db-journal
+*.sqlite-journal
+*.log
+
+# IDE / editor
+.idea/
+.vscode/
+
