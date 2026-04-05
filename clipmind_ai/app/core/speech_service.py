@@ -1,4 +1,6 @@
+import gc
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -6,6 +8,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Deque, Dict, Optional, Tuple
+
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
 
@@ -27,7 +33,6 @@ except ImportError:  # pragma: no cover - optional dependency in local dev
 TARGET_SAMPLE_RATE = 16000
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_MODEL_FOLDER = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
-# 更短的分块和解码间隔可以明显降低“看起来在等很久”的体感延迟。
 DEFAULT_PARTIAL_DECODE_INTERVAL = 0.18
 
 
@@ -41,7 +46,7 @@ class _AudioDeviceSpec:
 
 class _RecordingSession:
     """
-    持续采集系统音频和麦克风，并在后台增量解码。
+    Capture system audio + microphone and decode incrementally in background.
     """
 
     def __init__(
@@ -148,7 +153,6 @@ class _RecordingSession:
             if self._drain_pending_audio(final=False):
                 self._maybe_decode(force=False)
 
-        # 停止后，把队列里残留的音频尽量吃干净，再做一次最终解码。
         while self._drain_pending_audio(final=True):
             pass
         self._maybe_decode(force=True)
@@ -242,18 +246,14 @@ class _RecordingSession:
             if not final:
                 if mic_queue:
                     return mic_queue.popleft(), b""
-
                 if system_queue:
                     return b"", system_queue.popleft()
-
                 return None
 
             if mic_queue:
                 return mic_queue.popleft(), b""
-
             if system_queue:
                 return b"", system_queue.popleft()
-
             return None
 
     def _prepare_audio_chunk(self, source: str, raw_bytes: bytes) -> np.ndarray:
@@ -357,6 +357,7 @@ class SpeechService:
         self._recognizer_load_lock = threading.Lock()
         self._session: Optional[_RecordingSession] = None
         self._recognizer_cache: Dict[str, object] = {}
+        self._defer_preload_until_record = False
 
     def is_recording(self) -> bool:
         with self._lock:
@@ -366,9 +367,10 @@ class SpeechService:
         with self._lock:
             if self._session is not None:
                 return False, "语音录音已经在进行中"
+            self._defer_preload_until_record = False
 
         try:
-            recognizer = self._load_recognizer()
+            recognizer = self._load_recognizer(allow_retry_on_bad_alloc=True)
             session = _RecordingSession(recognizer, on_partial=on_partial)
             with self._lock:
                 self._session = session
@@ -378,8 +380,7 @@ class SpeechService:
             return True, "语音录音已开始"
         except Exception as e:
             with self._lock:
-                if self._session is not None:
-                    self._session = None
+                self._session = None
             logger.error(f"语音录音启动失败: {e}")
             return False, f"语音录音启动失败: {e}"
 
@@ -405,14 +406,25 @@ class SpeechService:
         return True, text
 
     def preload(self):
+        with self._lock:
+            if self._defer_preload_until_record:
+                return
+
         try:
-            self._load_recognizer()
+            self._load_recognizer(allow_retry_on_bad_alloc=False)
         except Exception as e:
+            message = str(e)
+            if self._is_bad_allocation(message):
+                with self._lock:
+                    self._defer_preload_until_record = True
+                logger.warning("语音模型预加载内存不足，改为首次录音时按需加载")
+                return
             logger.warning(f"语音识别模型预加载失败: {e}")
 
     def invalidate_cache(self):
         with self._lock:
             self._recognizer_cache.clear()
+            self._defer_preload_until_record = False
 
     def has_model(self) -> bool:
         return self._resolve_model_root() is not None
@@ -423,16 +435,13 @@ class SpeechService:
             self._session = None
         return session
 
-    def _load_recognizer(self):
+    def _load_recognizer(self, allow_retry_on_bad_alloc: bool = True):
         if sherpa_onnx is None:
             raise RuntimeError("未安装 sherpa-onnx，无法进行离线语音识别")
 
         model_root = self._resolve_model_root()
         if model_root is None:
-            raise RuntimeError(
-                "未找到 sherpa-onnx 语音模型目录。请在设置中填写模型目录，"
-                "并确保目录中包含 model.onnx 和 tokens.txt。"
-            )
+            raise RuntimeError("未找到语音模型目录，请在设置中配置包含 model.onnx 与 tokens.txt 的目录")
 
         cache_key = str(model_root.resolve())
         with self._lock:
@@ -449,23 +458,54 @@ class SpeechService:
             model_path = model_root / "model.onnx"
             tokens_path = model_root / "tokens.txt"
             if not model_path.is_file() or not tokens_path.is_file():
-                raise RuntimeError(
-                    f"语音模型目录无效: {model_root}\n"
-                    "目录中必须包含 model.onnx 和 tokens.txt。"
-                )
+                raise RuntimeError(f"语音模型目录无效: {model_root}")
 
             logger.info(f"加载语音识别模型: {model_root}")
-            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-                model=str(model_path),
-                tokens=str(tokens_path),
-                use_itn=True,
-                debug=False,
+            recognizer = self._create_recognizer_with_fallback(
+                model_path=model_path,
+                tokens_path=tokens_path,
+                allow_retry_on_bad_alloc=allow_retry_on_bad_alloc,
             )
 
             with self._lock:
                 self._recognizer_cache[cache_key] = recognizer
 
             return recognizer
+
+    def _create_recognizer_with_fallback(
+        self,
+        model_path: Path,
+        tokens_path: Path,
+        allow_retry_on_bad_alloc: bool,
+    ):
+        attempts = [True, False] if allow_retry_on_bad_alloc else [True]
+        last_error: Optional[Exception] = None
+
+        for idx, use_itn in enumerate(attempts, start=1):
+            try:
+                return sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                    model=str(model_path),
+                    tokens=str(tokens_path),
+                    num_threads=1,
+                    provider="cpu",
+                    use_itn=use_itn,
+                    debug=False,
+                )
+            except Exception as e:
+                last_error = e
+                if not self._is_bad_allocation(str(e)):
+                    continue
+                if idx >= len(attempts):
+                    continue
+                logger.warning("语音模型加载出现内存压力，正在使用轻量参数重试...")
+                gc.collect()
+                time.sleep(0.2)
+
+        raise last_error or RuntimeError("语音模型加载失败")
+
+    def _is_bad_allocation(self, message: str) -> bool:
+        normalized = (message or "").lower()
+        return "bad allocation" in normalized or "std::bad_alloc" in normalized
 
     def _resolve_model_root(self) -> Optional[Path]:
         configured_dir = getattr(config_manager.config, "speech_model_dir", "").strip()
@@ -511,5 +551,6 @@ class SpeechService:
 
     def _is_bundle_root(self, root: Path) -> bool:
         return (root / "model.onnx").is_file() and (root / "tokens.txt").is_file()
+
 
 speech_service = SpeechService()

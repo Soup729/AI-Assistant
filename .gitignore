@@ -29,3 +29,5 @@ config.json
 .idea/
 .vscode/
 clipmind_ai/assets/speech_models/
+clipmind_ai/assets/notes/
+.tmp_legacy_config.json

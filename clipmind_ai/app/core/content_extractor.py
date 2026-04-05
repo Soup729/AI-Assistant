@@ -1,65 +1,91 @@
+import asyncio
+from typing import List
+
+import httpx
 import requests
 from bs4 import BeautifulSoup
+
 from app.utils.logger import logger
 
 try:
     import trafilatura
-    _has_trafilatura = True
+
+    _HAS_TRAFILA = True
 except ImportError:
-    _has_trafilatura = False
+    _HAS_TRAFILA = False
+
 
 class ContentExtractor:
     def __init__(self):
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            )
         }
 
-    def fetch_url_content(self, url: str) -> str:
-        """
-        抓取并提取网页的正文部分。
-        """
-        try:
-            logger.info(f"正在抓取网页内容: {url}")
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            
-            # 设置正确的编码
-            response.encoding = response.apparent_encoding
-            html = response.text
-            
-            # 优先使用 trafilatura 提取正文
-            if _has_trafilatura:
+    def _extract_text_from_html(self, html: str) -> str:
+        if _HAS_TRAFILA:
+            try:
                 content = trafilatura.extract(html, include_links=False, include_images=False)
                 if content:
-                    logger.debug(f"通过 trafilatura 提取成功，内容长度: {len(content)}")
                     return content.strip()
-            
-            # 降级：使用 BeautifulSoup 提取所有文本（可能包含大量噪声）
-            soup = BeautifulSoup(html, "lxml") if "lxml" in html else BeautifulSoup(html, "html.parser")
-            
-            # 去除无用标签
-            for script_or_style in soup(["script", "style", "nav", "footer", "header"]):
-                script_or_style.decompose()
-            
-            text = soup.get_text(separator="\n", strip=True)
-            logger.debug(f"通过 BeautifulSoup 提取完成，内容长度: {len(text)}")
+            except Exception:
+                pass
+
+        soup = BeautifulSoup(html, "html.parser")
+        for node in soup(["script", "style", "nav", "footer", "header"]):
+            node.decompose()
+        return soup.get_text(separator="\n", strip=True)
+
+    async def afetch_url_content(self, url: str) -> str:
+        try:
+            logger.info(f"抓取网页内容: {url}")
+            async with httpx.AsyncClient(headers=self.headers, timeout=10.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                html = response.text
+            text = await asyncio.to_thread(self._extract_text_from_html, html)
             return text
-            
         except Exception as e:
             logger.error(f"抓取网页失败 ({url}): {e}")
             return ""
 
-    def get_summarized_context(self, urls: list, limit_char: int = 2000) -> str:
-        """
-        抓取多个 URL 并整合为上下文。
-        """
+    def fetch_url_content(self, url: str) -> str:
+        try:
+            logger.info(f"抓取网页内容: {url}")
+            response = requests.get(url, headers=self.headers, timeout=10)
+            response.raise_for_status()
+            response.encoding = response.apparent_encoding
+            return self._extract_text_from_html(response.text)
+        except Exception as e:
+            logger.error(f"抓取网页失败 ({url}): {e}")
+            return ""
+
+    async def aget_summarized_context(self, urls: List[str], limit_char: int = 2000) -> str:
+        if not urls:
+            return ""
+        tasks = [self.afetch_url_content(url) for url in urls]
+        contents = await asyncio.gather(*tasks, return_exceptions=True)
+
+        parts = []
+        for url, content in zip(urls, contents):
+            if isinstance(content, Exception):
+                continue
+            if content:
+                parts.append(f"Source URL: {url}\nContent: {content[:1000]}...")
+        merged = "\n\n---\n\n".join(parts)
+        return merged[:limit_char]
+
+    def get_summarized_context(self, urls: List[str], limit_char: int = 2000) -> str:
         all_contents = []
         for url in urls:
             content = self.fetch_url_content(url)
             if content:
                 all_contents.append(f"Source URL: {url}\nContent: {content[:1000]}...")
-        
         context = "\n\n---\n\n".join(all_contents)
         return context[:limit_char]
+
 
 content_extractor = ContentExtractor()

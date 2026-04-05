@@ -1,19 +1,38 @@
+import ctypes
 import sys
 from typing import Any, Iterable
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QPoint,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizeGrip,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from app.storage.config import config_manager
+from app.utils.logger import logger
+from app.utils.runtime_paths import get_project_root
+
 
 
 class DraggableTitleBar(QFrame):
@@ -43,6 +62,7 @@ class DraggableTitleBar(QFrame):
 class MainWindow(QMainWindow):
     request_exit_signal = Signal()
     model_changed_signal = Signal(str)
+    source_link_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -119,15 +139,11 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         self.btn_copy = QPushButton("复制结果")
         self.btn_copy.setObjectName("btnAction")
-        self.btn_paste = QPushButton("自动回填")
-        self.btn_paste.setObjectName("btnAction")
-
-        self.btn_send = QPushButton("发送(Enter)")
+        self.btn_send = QPushButton("发送 (Enter)")
         self.btn_send.setObjectName("btnSend")
         self.btn_send.setCursor(Qt.PointingHandCursor)
 
         btn_layout.addWidget(self.btn_copy)
-        btn_layout.addWidget(self.btn_paste)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_send)
 
@@ -290,6 +306,16 @@ class MainWindow(QMainWindow):
         cursor.insertText(text)
         self.output_text.setTextCursor(cursor)
         self.output_text.ensureCursorVisible()
+
+    def append_output_html(self, html: str):
+        cursor = self.output_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(html)
+        self.output_text.setTextCursor(cursor)
+        self.output_text.ensureCursorVisible()
+
+    def get_output_text(self) -> str:
+        return self.output_text.toPlainText()
 
     def set_input(self, text: str):
         self.input_text.setPlainText(text)

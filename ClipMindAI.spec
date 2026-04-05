@@ -11,7 +11,23 @@ package_root = project_root / 'clipmind_ai'
 
 datas = [(str(package_root / 'assets'), 'assets')]
 binaries = []
-hiddenimports = ['win32clipboard', 'win32con', 'win32api', 'win32gui', 'keyboard']
+hiddenimports = [
+    # Windows 系统交互
+    'win32clipboard', 'win32con', 'win32api', 'win32gui', 'win32process',
+    'keyboard',
+    # Qt + asyncio 集成
+    'qasync',
+    # RAG 向量计算核心
+    'numpy', 'numpy._core', 'numpy._core.multiarray',
+    # HTTP 请求（联网检索 + LLM 调用）
+    'httpx', 'httpcore._async', 'httpcore._sync',
+    'anyio', 'anyio._backends',
+    'h11', 'h2',
+    # 网页解析（联网检索）
+    'bs4', 'bs4.builder', 'trafilatura',
+    # 数据库（SQLite FTS5 全文索引 + RAG 元数据）
+    'sqlalchemy', 'sqlalchemy.ext.asyncio',
+]
 legacy_paddle_packages = ('paddle' + 'ocr', 'paddle' + 'paddle', 'paddle' + 'x')
 for package_name in ('rapidocr_onnxruntime', 'rapidocr', 'sherpa_onnx', 'pyaudiowpatch', 'onnxruntime'):
     try:

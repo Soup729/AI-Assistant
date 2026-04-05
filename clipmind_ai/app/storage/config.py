@@ -45,6 +45,7 @@ class AppConfig(BaseModel):
     hotkey_selection: str = Field(default="alt+q")
     hotkey_screenshot: str = Field(default="alt+w")
     hotkey_speech: str = Field(default="alt+e")
+    hotkey_paste: str = Field(default="alt+h")
 
     # Web search.
     enable_search: bool = Field(default=False)
@@ -53,6 +54,10 @@ class AppConfig(BaseModel):
     # UI.
     theme: str = Field(default="light")
     window_opacity: float = Field(default=0.95)
+    # window_width: int = Field(default=450)
+    # window_height: int = Field(default=660)
+    # window_size_initialized: bool = Field(default=False)
+    ui_material: str = Field(default="none")
 
     # OCR.
     ocr_engine: str = Field(default="rapid")
@@ -64,6 +69,13 @@ class AppConfig(BaseModel):
 
     # Speech recognition.
     speech_model_dir: str = Field(default="")
+
+    # Local notes RAG.
+    enable_rag: bool = Field(default=False)
+    rag_notes_dir: str = Field(default="")
+    rag_embedding_api_url: str = Field(default="https://api.openai.com/v1")
+    rag_embedding_api_key: str = Field(default="")
+    rag_embedding_model: str = Field(default="text-embedding-3-small")
 
 
 class ConfigManager:
@@ -102,6 +114,12 @@ class ConfigManager:
         if normalized in {"rapid", "cloud", "hybrid"}:
             return normalized
         return "rapid"
+
+    def _normalize_ui_material(self, value: str) -> str:
+        normalized = (value or "none").strip().lower()
+        if normalized in {"none", "mica", "acrylic"}:
+            return normalized
+        return "none"
 
     def _migrate_ocr_config(self, data: dict) -> dict:
         migrated = dict(data)
@@ -154,12 +172,91 @@ class ConfigManager:
             config.ocr_engine = normalized_engine
             changed = True
 
+        normalized_material = self._normalize_ui_material(getattr(config, "ui_material", "none"))
+        if config.ui_material != normalized_material:
+            config.ui_material = normalized_material
+            changed = True
+
         if not getattr(config, "ocr_cloud_image_field", "").strip():
             config.ocr_cloud_image_field = "image_file"
             changed = True
 
         if getattr(config, "ocr_cloud_timeout", 30) <= 0:
             config.ocr_cloud_timeout = 30
+            changed = True
+
+        rag_api_url = (getattr(config, "rag_embedding_api_url", "") or "").strip()
+        if not rag_api_url:
+            config.rag_embedding_api_url = "https://api.openai.com/v1"
+            changed = True
+
+        rag_model = (getattr(config, "rag_embedding_model", "") or "").strip()
+        if not rag_model:
+            config.rag_embedding_model = "text-embedding-3-small"
+            changed = True
+
+        if not (getattr(config, "hotkey_paste", "") or "").strip():
+            config.hotkey_paste = "alt+h"
+            changed = True
+        # if not (getattr(config, "hotkey_main", "") or "").strip():
+        #     config.hotkey_main = "alt+space"
+        #     changed = True
+        # if not (getattr(config, "hotkey_selection", "") or "").strip():
+        #     config.hotkey_selection = "alt+q"
+        #     changed = True
+        # if not (getattr(config, "hotkey_screenshot", "") or "").strip():
+        #     config.hotkey_screenshot = "alt+w"
+        #     changed = True
+        # if not (getattr(config, "hotkey_speech", "") or "").strip():
+        #     config.hotkey_speech = "alt+e"
+        #     changed = True
+
+        # # 老版本没有该字段时，强制回到经典默认尺寸（避免保留曾经的过宽窗口）。
+        # if not bool(getattr(config, "window_size_initialized", False)):
+        #     if getattr(config, "window_width", None) != 450:
+        #         config.window_width = 450
+        #         changed = True
+        #     if getattr(config, "window_height", None) != 660:
+        #         config.window_height = 660
+        #         changed = True
+        #     config.window_size_initialized = True
+        #     changed = True
+        # else:
+        #     try:
+        #         width = int(getattr(config, "window_width", 450))
+        #     except Exception:
+        #         width = 450
+        #     try:
+        #         height = int(getattr(config, "window_height", 660))
+        #     except Exception:
+        #         height = 660
+        #     clamped_width = min(max(width, 420), 1200)
+        #     clamped_height = min(max(height, 520), 1400)
+        #     if getattr(config, "window_width", None) != clamped_width:
+        #         config.window_width = clamped_width
+        #         changed = True
+        #     if getattr(config, "window_height", None) != clamped_height:
+        #         config.window_height = clamped_height
+        #         changed = True
+
+        rag_key = str(getattr(config, "rag_embedding_api_key", "") or "")
+        rag_key_is_ascii = True
+        if rag_key:
+            try:
+                rag_key.encode("ascii")
+            except UnicodeEncodeError:
+                rag_key_is_ascii = False
+        if (
+            rag_key
+            and (
+                "\n" in rag_key
+                or "\r" in rag_key
+                or "traceback" in rag_key.lower()
+                or len(rag_key) > 512
+                or not rag_key_is_ascii
+            )
+        ):
+            config.rag_embedding_api_key = ""
             changed = True
 
         return changed

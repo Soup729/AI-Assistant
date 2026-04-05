@@ -1,75 +1,118 @@
+import threading
 import time
-from contextlib import suppress
-from threading import Lock
 
 import keyboard
 from PySide6.QtCore import QThread, Signal
-from app.storage.config import config
+
+from app.storage.config import config_manager
 from app.utils.logger import logger
 
+
 class HotkeyThread(QThread):
-    """
-    后台线程，用于监听全局热键
-    """
     trigger_main_signal = Signal()
     trigger_selection_signal = Signal()
     trigger_screenshot_signal = Signal()
     trigger_speech_signal = Signal()
+    trigger_paste_signal = Signal()
 
     def __init__(self):
         super().__init__()
-        self.is_running = True
-        self._hotkey_handles = []
-        self._lock = Lock()
+        self._stop_event = threading.Event()
+        self._lock = threading.RLock()
+        self._hotkey_handles: dict[str, int] = {}
+        self._default_hotkeys = {
+            "main": "alt+space",
+            "selection": "alt+q",
+            "screenshot": "alt+w",
+            "speech": "alt+e",
+            "paste": "alt+h",
+        }
+
+    def _normalize_hotkey(self, value: str) -> str:
+        key = (value or "").strip().lower()
+        if not key:
+            return ""
+        # 用户可能输入 "alt + h" 这类带空格写法，统一规整。
+        key = key.replace(" + ", "+").replace("+ ", "+").replace(" +", "+")
+        key = " ".join(key.split())
+        return key
 
     def run(self):
+        self._stop_event.clear()
         self.register_hotkeys()
-        while self.is_running:
+        while not self._stop_event.is_set():
             time.sleep(0.2)
+        self._clear_hotkeys()
 
     def _clear_hotkeys(self):
-        for handle in self._hotkey_handles:
-            with suppress(Exception):
+        with self._lock:
+            handles = list(self._hotkey_handles.values())
+            self._hotkey_handles.clear()
+
+        for handle in handles:
+            try:
                 keyboard.remove_hotkey(handle)
-        self._hotkey_handles.clear()
+            except Exception:
+                continue
 
     def register_hotkeys(self):
-        """
-        注册或重新注册热键
-        """
-        try:
-            with self._lock:
-                self._clear_hotkeys()
+        with self._lock:
+            self._clear_hotkeys()
+            cfg = config_manager.config
+            hotkey_map = {
+                "main": (getattr(cfg, "hotkey_main", self._default_hotkeys["main"]), self.trigger_main_signal.emit),
+                "selection": (
+                    getattr(cfg, "hotkey_selection", self._default_hotkeys["selection"]),
+                    self.trigger_selection_signal.emit,
+                ),
+                "screenshot": (
+                    getattr(cfg, "hotkey_screenshot", self._default_hotkeys["screenshot"]),
+                    self.trigger_screenshot_signal.emit,
+                ),
+                "speech": (
+                    getattr(cfg, "hotkey_speech", self._default_hotkeys["speech"]),
+                    self.trigger_speech_signal.emit,
+                ),
+                "paste": (getattr(cfg, "hotkey_paste", self._default_hotkeys["paste"]), self.trigger_paste_signal.emit),
+            }
 
-                if config.hotkey_main:
-                    self._hotkey_handles.append(
-                        keyboard.add_hotkey(config.hotkey_main, self.trigger_main_signal.emit)
-                    )
-                if config.hotkey_selection:
-                    self._hotkey_handles.append(
-                        keyboard.add_hotkey(config.hotkey_selection, self.trigger_selection_signal.emit)
-                    )
-                if config.hotkey_screenshot:
-                    self._hotkey_handles.append(
-                        keyboard.add_hotkey(config.hotkey_screenshot, self.trigger_screenshot_signal.emit)
-                    )
-                if getattr(config, "hotkey_speech", ""):
-                    self._hotkey_handles.append(
-                        keyboard.add_hotkey(config.hotkey_speech, self.trigger_speech_signal.emit)
-                    )
+            registered_keys: dict[str, str] = {}
+            for name, (hotkey, callback) in hotkey_map.items():
+                hotkey = self._normalize_hotkey(hotkey)
+                if not hotkey:
+                    hotkey = self._default_hotkeys[name]
+                try:
+                    handle = keyboard.add_hotkey(hotkey, callback)
+                    self._hotkey_handles[name] = handle
+                    registered_keys[name] = hotkey
+                except Exception as e:
+                    fallback = self._default_hotkeys[name]
+                    if hotkey != fallback:
+                        try:
+                            handle = keyboard.add_hotkey(fallback, callback)
+                            self._hotkey_handles[name] = handle
+                            registered_keys[name] = fallback
+                            logger.warning(f"热键注册失败 [{name}:{hotkey}]，已回退默认键位 [{fallback}]")
+                            continue
+                        except Exception as fallback_error:
+                            logger.error(
+                                f"热键注册失败 [{name}:{hotkey}]，回退默认键位 [{fallback}] 仍失败: {fallback_error}"
+                            )
+                            continue
+                    logger.error(f"热键注册失败 [{name}:{hotkey}]: {e}")
 
             logger.info(
                 "热键已更新: "
-                f"主窗口={config.hotkey_main}, "
-                f"选中文本={config.hotkey_selection}, "
-                f"截图={config.hotkey_screenshot}, "
-                f"语音转文字={getattr(config, 'hotkey_speech', '')}"
+                f"main={registered_keys.get('main', '未注册')}, "
+                f"selection={registered_keys.get('selection', '未注册')}, "
+                f"screenshot={registered_keys.get('screenshot', '未注册')}, "
+                f"speech={registered_keys.get('speech', '未注册')}, "
+                f"paste={registered_keys.get('paste', '未注册')}, "
+                f"total={len(self._hotkey_handles)}"
             )
-        except Exception as e:
-            logger.error(f"热键注册失败: {e}")
 
     def stop(self):
-        self.is_running = False
-        with self._lock:
-            self._clear_hotkeys()
-        self.wait(3000)
+        self._stop_event.set()
+        self._clear_hotkeys()
+        self.quit()
+        self.wait(2000)

@@ -1,11 +1,12 @@
-import time
 import threading
+import time
 from contextlib import suppress
 
 import win32api
 import win32clipboard
 import win32con
 import win32gui
+import win32process
 from PySide6.QtCore import QObject, Signal
 
 from app.utils.logger import logger
@@ -18,13 +19,13 @@ class ClipboardService(QObject):
         super().__init__()
         self._lock = threading.RLock()
 
-    def _open_clipboard(self, retries: int = 6, delay: float = 0.05) -> bool:
+    def _open_clipboard(self, retries: int = 8, delay: float = 0.04) -> bool:
         last_error = None
         for _ in range(retries):
             try:
                 win32clipboard.OpenClipboard()
                 return True
-            except Exception as exc:  # pragma: no cover - clipboard contention is environment dependent
+            except Exception as exc:  # pragma: no cover
                 last_error = exc
                 time.sleep(delay)
 
@@ -36,12 +37,9 @@ class ClipboardService(QObject):
         with suppress(Exception):
             win32clipboard.CloseClipboard()
 
-    def _get_clipboard_text(self):
-        """
-        使用 Win32 API 直接读取剪贴板文本。
-        """
+    def _get_clipboard_text(self) -> str:
         with self._lock:
-            for _ in range(6):
+            for _ in range(8):
                 try:
                     self._open_clipboard()
                     try:
@@ -51,15 +49,12 @@ class ClipboardService(QObject):
                     finally:
                         self._close_clipboard()
                 except Exception:
-                    time.sleep(0.05)
+                    time.sleep(0.04)
         return ""
 
-    def _set_clipboard_text(self, text):
-        """
-        使用 Win32 API 直接设置剪贴板文本。
-        """
+    def _set_clipboard_text(self, text: str) -> bool:
         with self._lock:
-            for _ in range(6):
+            for _ in range(8):
                 try:
                     self._open_clipboard()
                     try:
@@ -70,7 +65,7 @@ class ClipboardService(QObject):
                         self._close_clipboard()
                 except Exception as exc:
                     logger.debug(f"写入剪贴板失败，准备重试: {exc}")
-                    time.sleep(0.05)
+                    time.sleep(0.04)
         return False
 
     def _release_modifiers(self):
@@ -97,29 +92,54 @@ class ClipboardService(QObject):
             if win32gui.GetForegroundWindow() == hwnd:
                 return True
 
-            with suppress(Exception):
-                if win32gui.IsIconic(hwnd):
-                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                else:
-                    win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
-            with suppress(Exception):
-                win32gui.BringWindowToTop(hwnd)
-            with suppress(Exception):
-                win32gui.SetForegroundWindow(hwnd)
+            fg_hwnd = win32gui.GetForegroundWindow()
+            current_tid = win32api.GetCurrentThreadId()
+            target_tid = win32process.GetWindowThreadProcessId(hwnd)[0]
+            fg_tid = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
 
-            time.sleep(0.03)
-            return win32gui.GetForegroundWindow() == hwnd
+            attached_pairs: list[tuple[int, int]] = []
+            for src, dst in ((current_tid, target_tid), (current_tid, fg_tid), (target_tid, fg_tid)):
+                if src and dst and src != dst:
+                    try:
+                        win32process.AttachThreadInput(src, dst, True)
+                        attached_pairs.append((src, dst))
+                    except Exception:
+                        continue
+
+            try:
+                with suppress(Exception):
+                    if win32gui.IsIconic(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    else:
+                        win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                with suppress(Exception):
+                    win32gui.BringWindowToTop(hwnd)
+                with suppress(Exception):
+                    win32gui.SetForegroundWindow(hwnd)
+                with suppress(Exception):
+                    win32gui.SetActiveWindow(hwnd)
+                with suppress(Exception):
+                    win32gui.SetFocus(hwnd)
+                time.sleep(0.05)
+                if win32gui.GetForegroundWindow() == hwnd:
+                    return True
+
+                # Second-chance focus attempt.
+                with suppress(Exception):
+                    win32gui.SetForegroundWindow(hwnd)
+                time.sleep(0.08)
+                return win32gui.GetForegroundWindow() == hwnd
+            finally:
+                for src, dst in reversed(attached_pairs):
+                    with suppress(Exception):
+                        win32process.AttachThreadInput(src, dst, False)
         except Exception as exc:
             logger.warning(f"恢复目标窗口焦点失败: {exc}")
             return False
 
-    def read_selected_text(self):
-        """
-        通过模拟 Ctrl+C 读取选中文本。
-        """
+    def read_selected_text(self) -> str:
         with self._lock:
             original_content = self._get_clipboard_text()
-
             try:
                 self._release_modifiers()
                 time.sleep(0.05)
@@ -145,19 +165,22 @@ class ClipboardService(QObject):
             finally:
                 self._set_clipboard_text(original_content)
 
-    def copy_to_clipboard(self, text: str):
+    def copy_to_clipboard(self, text: str) -> bool:
         if self._set_clipboard_text(text):
             logger.info("已成功复制到剪贴板")
             return True
-
         logger.error("复制到剪贴板失败")
         return False
 
-    def auto_paste(self, text: str, target_hwnd: int, focus_delay_ms: int = 60, restore_delay_ms: int = 120):
+    def auto_paste(self, text: str, target_hwnd: int, focus_delay_ms: int = 80, restore_delay_ms: int = 150) -> bool:
         with self._lock:
             original_content = self._get_clipboard_text()
 
             try:
+                # 热键触发时常残留 Alt/Ctrl 状态，先显式抬起，避免只触发一次或粘贴失败。
+                self._release_modifiers()
+                time.sleep(0.02)
+
                 if not self._set_clipboard_text(text):
                     return False
 
@@ -167,14 +190,15 @@ class ClipboardService(QObject):
 
                 time.sleep(max(0, focus_delay_ms) / 1000.0)
                 self._send_ctrl_combo(ord("V"))
+                self._release_modifiers()
                 time.sleep(max(0, restore_delay_ms) / 1000.0)
-
                 logger.info("已执行自动回填")
                 return True
             except Exception as exc:
                 logger.error(f"自动回填失败: {exc}")
                 return False
             finally:
+                self._release_modifiers()
                 self._set_clipboard_text(original_content)
 
 
