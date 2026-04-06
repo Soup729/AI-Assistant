@@ -5,12 +5,14 @@ from typing import Any, Iterable
 from PySide6.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
-    QPoint,
     QParallelAnimationGroup,
     QPropertyAnimation,
     Qt,
     QTimer,
+    QUrl,
     Signal,
+    Slot,
+    QRect,
 )
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCursor
 from PySide6.QtWidgets import (
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QApplication,
     QPushButton,
     QSizeGrip,
     QTextBrowser,
@@ -70,7 +73,10 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowOpacity(0.95)
-        self.setMinimumSize(450, 660)
+        self.setMinimumSize(450, 560)
+
+        # 恢复窗口位置和大小
+        self._restore_geometry()
 
         self._init_ui()
         self._setup_style()
@@ -120,10 +126,17 @@ class MainWindow(QMainWindow):
         self.combo_template.setObjectName("comboTemplate")
         self.combo_template.setFixedHeight(32)
 
-        self.ocr_status_label = QLabel("OCR：未初始化")
+        # 状态栏：OCR、语音、RAG、搜索 一行排列
+        self.ocr_status_label = QLabel("OCR")
         self.ocr_status_label.setObjectName("ocrStatusLabel")
+        self.speech_status_label = QLabel("语音")
+        self.speech_status_label.setObjectName("speechStatusLabel")
+        self.rag_status_label = QLabel("RAG")
+        self.rag_status_label.setObjectName("ragStatusLabel")
+        self.search_status_label = QLabel("搜索")
+        self.search_status_label.setObjectName("searchStatusLabel")
 
-        self.response_status_label = QLabel("AI：等待发送")
+        self.response_status_label = QLabel("状态：等待发送")
         self.response_status_label.setObjectName("responseStatusLabel")
 
         self.input_text = QTextEdit()
@@ -131,10 +144,11 @@ class MainWindow(QMainWindow):
         self.input_text.setPlaceholderText("在这里输入问题，或粘贴选中的文本...")
         self.input_text.setMaximumHeight(120)
 
-        self.output_text = QTextEdit()
+        self.output_text = QTextBrowser()
         self.output_text.setObjectName("outputText")
-        self.output_text.setReadOnly(True)
+        self.output_text.setOpenExternalLinks(False)
         self.output_text.setPlaceholderText("AI 的回答会显示在这里...")
+        self.output_text.anchorClicked.connect(self._on_output_anchor_clicked)
 
         btn_layout = QHBoxLayout()
         self.btn_copy = QPushButton("复制结果")
@@ -147,15 +161,31 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_send)
 
+        # 状态栏：OCR、语音、RAG、搜索 一行排列，AI状态单独一行
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(self.ocr_status_label)
+        status_layout.addWidget(self.speech_status_label)
+        status_layout.addWidget(self.rag_status_label)
+        status_layout.addWidget(self.search_status_label)
+        status_layout.addStretch()
+
         layout.addWidget(self.title_bar)
         layout.addWidget(self.model_label)
         layout.addWidget(self.combo_model)
         layout.addWidget(self.combo_template)
-        layout.addWidget(self.ocr_status_label)
+        layout.addLayout(status_layout)
         layout.addWidget(self.response_status_label)
         layout.addWidget(self.input_text)
         layout.addWidget(self.output_text)
         layout.addLayout(btn_layout)
+
+        # 添加窗口大小调整把手
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setObjectName("sizeGrip")
+        size_grip_layout = QHBoxLayout()
+        size_grip_layout.addStretch()
+        size_grip_layout.addWidget(self.size_grip)
+        layout.addLayout(size_grip_layout)
 
     def _setup_style(self):
         self.setStyleSheet(
@@ -196,7 +226,7 @@ class MainWindow(QMainWindow):
             #btnTitle:hover {
                 background-color: #e6e6e6;
             }
-            QTextEdit#inputText, QTextEdit#outputText {
+            QTextEdit#inputText, QTextBrowser#outputText {
                 background-color: rgba(255, 255, 255, 180);
                 border: 1px solid rgba(220, 220, 220, 200);
                 border-radius: 8px;
@@ -204,6 +234,14 @@ class MainWindow(QMainWindow):
                 font-family: 'Segoe UI', 'Microsoft YaHei';
                 font-size: 14px;
                 color: #333333;
+            }
+            QTextBrowser#outputText a {
+                color: #1890ff;
+                text-decoration: none;
+            }
+            QTextBrowser#outputText a:hover {
+                color: #40a9ff;
+                text-decoration: underline;
             }
             QComboBox {
                 background-color: rgba(255, 255, 255, 180);
@@ -215,7 +253,15 @@ class MainWindow(QMainWindow):
             QComboBox::drop-down {
                 border: none;
             }
-            #ocrStatusLabel, #responseStatusLabel {
+            #ocrStatusLabel, #speechStatusLabel, #ragStatusLabel, #searchStatusLabel {
+                color: #888888;
+                font-size: 12px;
+                padding: 3px 10px 3px 10px;
+                border: 1px solid rgba(200, 200, 200, 150);
+                border-radius: 4px;
+                background-color: rgba(245, 245, 245, 180);
+            }
+            #responseStatusLabel {
                 color: #666666;
                 font-size: 12px;
                 padding: 2px 4px 2px 4px;
@@ -248,6 +294,12 @@ class MainWindow(QMainWindow):
             #btnSend:disabled {
                 background-color: #bfbfbf;
             }
+            #sizeGrip {
+                width: 16px;
+                height: 16px;
+                background-color: transparent;
+                border: none;
+            }
             """
         )
 
@@ -255,6 +307,13 @@ class MainWindow(QMainWindow):
         model_id = self.combo_model.itemData(index)
         if model_id:
             self.model_changed_signal.emit(str(model_id))
+
+    @Slot(QUrl)
+    def _on_output_anchor_clicked(self, url: QUrl):
+        # 阻止 QTextBrowser 的默认导航行为，否则会清空内容
+        self.output_text.setSource(QUrl())
+        if url.isValid():
+            self.source_link_signal.emit(url.toString())
 
     def _model_label(self, profile: Any) -> str:
         display_name = getattr(profile, "display_name", "") or ""
@@ -271,6 +330,9 @@ class MainWindow(QMainWindow):
         return (
             f"Base URL: {api_base_url}\n"
             f"Model: {model_name}\n"
+            f"Temperature: {temperature}\n"
+            f"Temperature: {temperature}\n"
+            f"Temperature: {temperature}\n"
             f"Temperature: {temperature}\n"
             f"Max Tokens: {max_tokens}"
         )
@@ -333,10 +395,75 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def set_ocr_status(self, text: str):
-        self.ocr_status_label.setText(f"OCR：{text}")
+        self.ocr_status_label.setText(f"OCR {text}")
+
+    def set_speech_status(self, text: str):
+        self.speech_status_label.setText(f"语音 {text}")
+
+    def set_rag_status(self, text: str):
+        self.rag_status_label.setText(f"RAG {text}")
+
+    def set_search_status(self, text: str):
+        self.search_status_label.setText(f"搜索 {text}")
 
     def set_response_status(self, text: str):
-        self.response_status_label.setText(f"AI：{text}")
+        self.response_status_label.setText(f"状态：{text}")
+
+    def _restore_geometry(self):
+        """恢复窗口位置和大小"""
+        geometry = config_manager.config.window_geometry
+        if geometry:
+            try:
+                from json import loads
+                data = loads(geometry)
+                # 确保恢复的窗口至少部分可见
+                frame_geo = QRect(
+                    data.get("x", 100),
+                    data.get("y", 100),
+                    data.get("width", 500),
+                    data.get("height", 750)
+                )
+                # 验证窗口至少部分在屏幕内
+                screen = QApplication.primaryScreen().geometry()
+                if screen.intersects(frame_geo):
+                    self.setGeometry(frame_geo)
+                    return
+            except Exception as e:
+                logger.warning(f"恢复窗口几何信息失败: {e}")
+        # 默认居中显示
+        self._center_on_screen()
+
+    def _save_geometry(self):
+        """保存窗口位置和大小"""
+        try:
+            from json import dumps
+            geo = self.geometry()
+            data = {
+                "x": geo.x(),
+                "y": geo.y(),
+                "width": geo.width(),
+                "height": geo.height()
+            }
+            config_manager.update(window_geometry=dumps(data))
+        except Exception as e:
+            logger.warning(f"保存窗口几何信息失败: {e}")
+
+    def _center_on_screen(self):
+        """窗口居中显示"""
+        screen = QApplication.primaryScreen().geometry()
+        geo = self.geometry()
+        geo.moveCenter(screen.center())
+        self.setGeometry(geo)
+
+    def moveEvent(self, event):
+        """窗口移动后保存位置"""
+        super().moveEvent(event)
+        self._save_geometry()
+
+    def resizeEvent(self, event):
+        """窗口大小变化后保存大小"""
+        super().resizeEvent(event)
+        self._save_geometry()
 
     def closeEvent(self, event):
         self.request_exit_signal.emit()

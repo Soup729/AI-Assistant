@@ -9,6 +9,7 @@ class OverlayWindow(QWidget):
     截图遮罩层，采用先截全屏再蒙层的稳定方案
     """
     screenshot_captured = Signal(object)
+    screenshot_cancelled = Signal()
 
     def __init__(self):
         super().__init__()
@@ -17,12 +18,14 @@ class OverlayWindow(QWidget):
         self.setWindowState(Qt.WindowFullScreen)
         # 注意：这里不再设置 WA_TranslucentBackground，因为我们要自己画背景
         self.setCursor(Qt.CrossCursor)
-        
+        # 设置焦点策略，确保能接收键盘事件
+        self.setFocusPolicy(Qt.StrongFocus)
+
         # 1. 立即捕获全屏内容
         screen = QApplication.primaryScreen()
         self.full_screen_pixmap = screen.grabWindow(0)
         self.device_pixel_ratio = self.full_screen_pixmap.devicePixelRatio()
-        
+
         self.origin = QPoint()
         self.rubberBand = QRubberBand(QRubberBand.Rectangle, self)
 
@@ -69,45 +72,50 @@ class OverlayWindow(QWidget):
         if event.button() == Qt.LeftButton:
             self.rubberBand.hide()
             rect = self.rubberBand.geometry()
-            
-            # 捕获选定区域
-            if rect.width() > 5 and rect.height() > 5:
-                self.hide()
-                # 稍微延迟，确保窗口已隐藏
-                QApplication.processEvents()
-                
-                # 从我们之前存的全屏图中裁剪出选区
-                # 这样比重新用 mss 截图更稳，且不会黑屏
-                source_rect = QRect(
-                    int(rect.x() * self.device_pixel_ratio),
-                    int(rect.y() * self.device_pixel_ratio),
-                    int(rect.width() * self.device_pixel_ratio),
-                    int(rect.height() * self.device_pixel_ratio),
-                )
-                selected_pixmap = self.full_screen_pixmap.copy(source_rect)
-                selected_pixmap.setDevicePixelRatio(1.0)
-                # 转换为 OCR 服务需要的格式 (PIL Image 或 mss 类似的对象)
-                # 为了兼容 ocr_service.py，我们直接转为 PIL Image
-                image = selected_pixmap.toImage()
-                self.screenshot_captured.emit(image)
-            
+
+            # 区域过小时视为取消操作
+            if rect.width() <= 5 or rect.height() <= 5:
+                self.screenshot_cancelled.emit()
+                self.close()
+                return
+
+            self.hide()
+            QApplication.processEvents()
+
+            # 从我们之前存的全屏图中裁剪出选区
+            source_rect = QRect(
+                int(rect.x() * self.device_pixel_ratio),
+                int(rect.y() * self.device_pixel_ratio),
+                int(rect.width() * self.device_pixel_ratio),
+                int(rect.height() * self.device_pixel_ratio),
+            )
+            selected_pixmap = self.full_screen_pixmap.copy(source_rect)
+            selected_pixmap.setDevicePixelRatio(1.0)
+            image = selected_pixmap.toImage()
+            self.screenshot_captured.emit(image)
             self.close()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
+            self.screenshot_cancelled.emit()
             self.close()
 
 class ScreenshotService:
     def __init__(self):
         self.overlay = None
 
-    def start_selection(self, callback):
+    def start_selection(self, callback, cancel_callback=None):
         try:
             # 确保在主线程创建和显示
             self.overlay = OverlayWindow()
             self.overlay.screenshot_captured.connect(callback)
+            if cancel_callback:
+                self.overlay.screenshot_cancelled.connect(cancel_callback)
             self.overlay.show()
-            logger.info("启动稳定版截图区域选择")
+            self.overlay.raise_()
+            self.overlay.activateWindow()
+            self.overlay.setFocus()
+            logger.info("启动截图区域选择")
         except Exception as e:
             logger.error(f"启动截图服务失败: {e}")
 

@@ -58,6 +58,9 @@ class AppController(QObject):
     speech_finished_signal = Signal(bool, str)
     speech_partial_signal = Signal(str)
     rag_animation_signal = Signal(bool)
+    speech_status_signal = Signal(str)
+    rag_status_signal = Signal(str)
+    search_status_signal = Signal(str)
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
         super().__init__()
@@ -139,6 +142,9 @@ class AppController(QObject):
         self.speech_finished_signal.connect(self._on_speech_finished)
 
         self.rag_animation_signal.connect(self._set_rag_animation)
+        self.speech_status_signal.connect(self.main_window.set_speech_status)
+        self.rag_status_signal.connect(self.main_window.set_rag_status)
+        self.search_status_signal.connect(self.main_window.set_search_status)
 
     def _create_task(self, coro, task_name: str) -> Optional[asyncio.Task]:
         if self._is_shutting_down:
@@ -202,7 +208,6 @@ class AppController(QObject):
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
-        # self.main_window.show_with_animation()
 
     @Slot()
     def show_settings_window(self):
@@ -214,7 +219,6 @@ class AppController(QObject):
     def toggle_main_window(self):
         if self.main_window.isVisible():
             self.main_window.hide()
-            # self.main_window.hide_with_animation()
             return
         self._capture_foreground_window()
         self._show_main_window()
@@ -241,7 +245,11 @@ class AppController(QObject):
     @Slot()
     def handle_screenshot(self):
         self._capture_foreground_window()
-        QTimer.singleShot(180, lambda: screenshot_service.start_selection(self.on_screenshot_captured))
+        self.main_window.hide()
+        QTimer.singleShot(180, lambda: screenshot_service.start_selection(
+            self._on_screenshot_captured,
+            cancel_callback=self._on_screenshot_cancelled
+        ))
 
     @Slot()
     def toggle_speech_recording(self):
@@ -282,31 +290,45 @@ class AppController(QObject):
         await self._run_speech_task_async()
 
     @Slot(object)
-    def on_screenshot_captured(self, screenshot):
+    def _on_screenshot_captured(self, screenshot):
+        self.main_window.show()
         self.main_window.set_input("正在执行 OCR 识别，请稍候...")
-        self.ocr_status_signal.emit(ocr_service.get_status())
+        self.ocr_status_signal.emit("识别中")
         self._create_task(self._run_ocr_task_async(screenshot), "OCR 识别")
 
+    @Slot()
+    def _on_screenshot_cancelled(self):
+        self.main_window.show()
+
     async def _run_ocr_task_async(self, screenshot):
+        OCR_TIMEOUT = 10  # OCR识别超时时间（秒）
         try:
-            self.ocr_status_signal.emit("识别中...")
-            text = await ocr_service.arecognize_text(screenshot)
-            self.ocr_status_signal.emit(ocr_service.get_status())
+            self.ocr_status_signal.emit("识别中")
+            text = await asyncio.wait_for(
+                ocr_service.arecognize_text(screenshot),
+                timeout=OCR_TIMEOUT
+            )
+            self.ocr_status_signal.emit(self._status_to_text(ocr_service.get_status()))
             if text.startswith("Error:"):
                 logger.warning(text)
-                self.ocr_status_signal.emit("识别失败")
+                self.ocr_status_signal.emit("有异常")
                 self.main_window.set_response_status(text)
                 return
             if text:
                 self.ocr_result_signal.emit(text)
+            else:
+                self.ocr_status_signal.emit("已就绪")
+        except asyncio.TimeoutError:
+            logger.warning("OCR 识别超时")
+            self.ocr_status_signal.emit("有异常")
+            self.main_window.set_response_status("OCR 识别超时，请重试")
         except Exception as e:
             logger.error(f"OCR 任务失败: {e}")
-            self.ocr_status_signal.emit("识别失败")
+            self.ocr_status_signal.emit("有异常")
 
     def _preload_ocr_task(self):
-        self.ocr_status_signal.emit(ocr_service.get_status())
         ocr_service.preload()
-        self.ocr_status_signal.emit(ocr_service.get_status())
+        self.ocr_status_signal.emit(self._status_to_text(ocr_service.get_status()))
 
     async def _run_speech_task_async(self):
         try:
@@ -429,7 +451,6 @@ class AppController(QObject):
         self._ai_response_started = False
         self._ai_wait_elapsed.start()
         self._ai_wait_timer.start()
-        # self.main_window.set_ai_busy(True)
         self.main_window.set_response_status(status_text)
 
     def _on_ai_chunk_received(self, _chunk: str):
@@ -553,7 +574,6 @@ class AppController(QObject):
     def _on_ai_finished(self, success: bool, payload: str):
         self.rag_animation_signal.emit(False)
         self._ai_wait_timer.stop()
-        # self.main_window.set_ai_busy(False)
         self.main_window.btn_send.setEnabled(True)
         self._ai_task = None
 
@@ -661,7 +681,6 @@ class AppController(QObject):
         self._ai_wait_timer.stop()
         self._speech_wait_timer.stop()
         self._rag_anim_timer.stop()
-        # self.main_window.set_ai_busy(False)
 
         if self._ai_task and not self._ai_task.done():
             self._ai_task.cancel()
@@ -694,32 +713,88 @@ class AppController(QObject):
         if app is not None:
             app.quit()
 
-    @Slot()
-    def on_config_updated(self):
-        self.hotkey_thread.register_hotkeys()
-        # self.main_window.apply_visual_preset(getattr(config_manager.config, "ui_material", "none"))
+    @Slot(str)
+    def on_config_updated(self, scope: str = "general"):
+        if scope in ("general", "hotkey"):
+            self.hotkey_thread.register_hotkeys()
 
-        ocr_service.set_mode(getattr(config_manager.config, "ocr_engine", "rapid"))
-        ocr_service.invalidate_cache()
-        self.ocr_status_signal.emit(ocr_service.get_status())
+        if scope in ("general", "ocr"):
+            ocr_service.set_mode(getattr(config_manager.config, "ocr_engine", "rapid"))
+            ocr_service.invalidate_cache()
+            self.ocr_status_signal.emit(self._status_to_text(ocr_service.get_status()))
 
-        speech_service.invalidate_cache()
-        rag_service.reload_config()
+        if scope in ("general", "speech"):
+            speech_service.invalidate_cache()
 
-        prompt_engine.refresh_templates()
-        self._load_templates()
-        self._load_models()
+        if scope in ("general", "rag"):
+            rag_service.reload_config()
 
-        self._create_task(self._preload_background_services_async(), "配置热更新预加载")
-        logger.info("配置已动态更新")
+        if scope in ("general", "template"):
+            prompt_engine.refresh_templates()
+            self._load_templates()
+
+        if scope in ("general", "model"):
+            self._load_models()
+            self._create_task(self._preload_background_services_async(), "配置热更新预加载")
+
+        if scope == "general":
+            logger.info("配置已动态更新")
 
     def start(self):
         self.hotkey_thread.start()
-        # self.main_window.apply_visual_preset(getattr(config_manager.config, "ui_material", "none"))
         self._show_main_window()
-        self.ocr_status_signal.emit(ocr_service.get_status())
+        self.ocr_status_signal.emit(self._status_to_text(ocr_service.get_status()))
+        self._emit_initial_status()
         self.main_window.set_response_status("待发送")
         self._create_task(self._preload_background_services_async(), "启动预加载")
+
+    def _status_to_text(self, status: str) -> str:
+        """将状态文本映射为3字状态：已就绪、未启用、未配置、有异常"""
+        if not status:
+            return "未配置"
+        if "失败" in status or "错误" in status or "error" in status.lower():
+            return "有异常"
+        if status in ("就绪", "已就绪", "已配置", "√"):
+            return "已就绪"
+        if "未初始化" in status:
+            return "初始化中"
+        if "未启用" in status or "未配置" in status or "×" in status:
+            return "未启用"
+        # 正在进行中的状态视为就绪
+        if "就绪" in status or "ready" in status.lower() or "识别中" in status:
+            return "已就绪"
+        return "有异常"
+
+    def _emit_initial_status(self):
+        # 语音识别状态
+        if config_manager.config.speech_model_dir:
+            logger.info("语音识别：已配置，初始化中...")
+            self.speech_status_signal.emit("初始化中")
+        else:
+            logger.info("语音识别：未配置")
+            self.speech_status_signal.emit("未配置")
+
+        # RAG 状态
+        if config_manager.config.enable_rag and config_manager.config.rag_notes_dir:
+            logger.info("RAG：已启用，索引构建中...")
+            self.rag_status_signal.emit("初始化中")
+        elif config_manager.config.enable_rag:
+            logger.info("RAG：已启用但未配置知识库目录")
+            self.rag_status_signal.emit("未就绪")
+        else:
+            logger.info("RAG：未启用")
+            self.rag_status_signal.emit("未启用")
+
+        # 联网搜索状态
+        if config_manager.config.enable_search and config_manager.config.search_api_key:
+            logger.info("联网搜索：已配置")
+            self.search_status_signal.emit("已就绪")
+        elif config_manager.config.enable_search:
+            logger.info("联网搜索：已启用但未配置 API Key")
+            self.search_status_signal.emit("未就绪")
+        else:
+            logger.info("联网搜索：未启用")
+            self.search_status_signal.emit("未启用")
 
     async def _preload_background_services_async(self):
         if speech_service.has_model():
@@ -727,10 +802,12 @@ class AppController(QObject):
                 logger.info("启动阶段开始预加载语音识别模型")
                 await asyncio.to_thread(speech_service.preload)
                 logger.info("语音识别模型预加载流程完成")
+                self.speech_status_signal.emit("已就绪")
             except Exception as e:
                 logger.warning(f"语音模型预加载失败（录音时将自动重试）: {e}")
+                self.speech_status_signal.emit("有异常")
         else:
-            logger.info("未配置语音模型目录，跳过语音预加载")
+            self.speech_status_signal.emit("未配置")
 
         try:
             await asyncio.to_thread(self._preload_ocr_task)
@@ -739,8 +816,14 @@ class AppController(QObject):
 
         try:
             await asyncio.to_thread(rag_service.reload_config)
+            if rag_service.is_config_ready():
+                logger.info("RAG 索引构建完成")
+                self.rag_status_signal.emit("已就绪")
+            else:
+                self.rag_status_signal.emit("未就绪")
         except Exception as e:
             logger.warning(f"RAG 后台索引启动失败: {e}")
+            self.rag_status_signal.emit("有异常")
 
 
 def main():

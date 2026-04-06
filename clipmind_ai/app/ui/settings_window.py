@@ -24,7 +24,8 @@ from app.storage.db import db_manager
 
 
 class SettingsWindow(QDialog):
-    config_updated = Signal()
+    # scope: "model" | "template" | "hotkey" | "ocr" | "rag" | "speech" | "general"
+    config_updated = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -397,7 +398,7 @@ class SettingsWindow(QDialog):
         self._model_profiles.append(new_profile)
         self._save_model_profiles()
         self._fill_model_form(new_profile)
-        self.config_updated.emit()
+        self.config_updated.emit("model")
 
     def _save_model(self):
         if not self._model_profiles:
@@ -420,7 +421,7 @@ class SettingsWindow(QDialog):
 
         self._save_model_profiles()
         self._fill_model_form(profile)
-        self.config_updated.emit()
+        self.config_updated.emit("model")
 
     def _set_active_model(self):
         if not self._selected_model_id:
@@ -428,7 +429,7 @@ class SettingsWindow(QDialog):
         if config_manager.set_active_model(self._selected_model_id):
             self._model_profiles = config_manager.get_model_profiles()
             self._refresh_model_list(self._selected_model_id)
-            self.config_updated.emit()
+            self.config_updated.emit("model")
 
     def _delete_model(self):
         if not self._selected_model_id:
@@ -445,7 +446,7 @@ class SettingsWindow(QDialog):
         config_manager.remove_model_profile(self._selected_model_id)
         self._model_profiles = config_manager.get_model_profiles()
         self._refresh_model_list(config_manager.config.active_model_id)
-        self.config_updated.emit()
+        self.config_updated.emit("model")
 
     def _on_template_selected(self, index: int):
         if index < 0 or index >= len(self.templates):
@@ -522,29 +523,63 @@ class SettingsWindow(QDialog):
         QMessageBox.information(self, "成功", "模板已更新。")
 
     def _save_config(self):
-        config_manager.update(
-            hotkey_main=self.edit_hk_main.text().strip(),
-            hotkey_selection=self.edit_hk_selection.text().strip(),
-            hotkey_screenshot=self.edit_hk_screenshot.text().strip(),
-            hotkey_speech=self.edit_hk_speech.text().strip(),
-            hotkey_paste=self.edit_hk_paste.text().strip(),
-            enable_search=self.check_search.isChecked(),
-            search_api_key=self.edit_search_key.text().strip(),
-            # ui_material=self.combo_ui_material.currentData(),
-            ocr_engine=self.combo_ocr_engine.currentData(),
-            ocr_cloud_api_url=self.edit_ocr_cloud_url.text().strip(),
-            ocr_cloud_api_key=self.edit_ocr_cloud_key.text().strip(),
-            ocr_cloud_image_field=self.edit_ocr_cloud_image_field.text().strip(),
-            ocr_cloud_text_path=self.edit_ocr_cloud_text_path.text().strip(),
-            ocr_cloud_timeout=self.spin_ocr_cloud_timeout.value(),
-            speech_model_dir=self.edit_speech_model_dir.text().strip(),
-            enable_rag=self.check_enable_rag.isChecked(),
-            rag_notes_dir=self.edit_rag_notes_dir.text().strip(),
-            rag_embedding_api_url=self.edit_rag_embedding_url.text().strip(),
-            rag_embedding_api_key=self.edit_rag_embedding_key.text().strip(),
-            rag_embedding_model=self.edit_rag_embedding_model.text().strip(),
-        )
-        self.config_updated.emit()
+        old_config = config_manager.config
+
+        # 收集新值
+        new_values = {
+            "hotkey_main": self.edit_hk_main.text().strip(),
+            "hotkey_selection": self.edit_hk_selection.text().strip(),
+            "hotkey_screenshot": self.edit_hk_screenshot.text().strip(),
+            "hotkey_speech": self.edit_hk_speech.text().strip(),
+            "hotkey_paste": self.edit_hk_paste.text().strip(),
+            "enable_search": self.check_search.isChecked(),
+            "search_api_key": self.edit_search_key.text().strip(),
+            "ocr_engine": self.combo_ocr_engine.currentData(),
+            "ocr_cloud_api_url": self.edit_ocr_cloud_url.text().strip(),
+            "ocr_cloud_api_key": self.edit_ocr_cloud_key.text().strip(),
+            "ocr_cloud_image_field": self.edit_ocr_cloud_image_field.text().strip(),
+            "ocr_cloud_text_path": self.edit_ocr_cloud_text_path.text().strip(),
+            "ocr_cloud_timeout": self.spin_ocr_cloud_timeout.value(),
+            "speech_model_dir": self.edit_speech_model_dir.text().strip(),
+            "enable_rag": self.check_enable_rag.isChecked(),
+            "rag_notes_dir": self.edit_rag_notes_dir.text().strip(),
+            "rag_embedding_api_url": self.edit_rag_embedding_url.text().strip(),
+            "rag_embedding_api_key": self.edit_rag_embedding_key.text().strip(),
+            "rag_embedding_model": self.edit_rag_embedding_model.text().strip(),
+        }
+
+        # 检测变更的scope
+        changed_scopes = set()
+        old_vals = old_config.model_dump()
+
+        # 热键变更
+        if any(old_vals.get(k) != new_values[k] for k in ("hotkey_main", "hotkey_selection", "hotkey_screenshot", "hotkey_speech", "hotkey_paste")):
+            changed_scopes.add("hotkey")
+        # 搜索设置变更
+        if old_vals.get("enable_search") != new_values["enable_search"] or old_vals.get("search_api_key") != new_values["search_api_key"]:
+            changed_scopes.add("search")
+        # OCR变更
+        if any(old_vals.get(k) != new_values[k] for k in ("ocr_engine", "ocr_cloud_api_url", "ocr_cloud_api_key", "ocr_cloud_image_field", "ocr_cloud_text_path", "ocr_cloud_timeout")):
+            changed_scopes.add("ocr")
+        # 语音模型变更
+        if old_vals.get("speech_model_dir") != new_values["speech_model_dir"]:
+            changed_scopes.add("speech")
+        # RAG变更
+        if any(old_vals.get(k) != new_values[k] for k in ("enable_rag", "rag_notes_dir", "rag_embedding_api_url", "rag_embedding_api_key", "rag_embedding_model")):
+            changed_scopes.add("rag")
+
+        # 如果没有任何明确识别的变更，但有值不同，仍触发general
+        if not changed_scopes:
+            # 检查是否有其他未列出的字段变更
+            for k, v in new_values.items():
+                if old_vals.get(k) != v:
+                    changed_scopes.add("general")
+                    break
+
+        config_manager.update(**new_values)
+
+        if changed_scopes:
+            self.config_updated.emit(next(iter(changed_scopes)) if len(changed_scopes) == 1 else "general")
         QMessageBox.information(self, "成功", "设置已保存。")
         self.accept()
 

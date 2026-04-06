@@ -54,10 +54,8 @@ class AppConfig(BaseModel):
     # UI.
     theme: str = Field(default="light")
     window_opacity: float = Field(default=0.95)
-    # window_width: int = Field(default=450)
-    # window_height: int = Field(default=660)
-    # window_size_initialized: bool = Field(default=False)
     ui_material: str = Field(default="none")
+    window_geometry: str = Field(default="")  # 窗口位置和大小 JSON
 
     # OCR.
     ocr_engine: str = Field(default="rapid")
@@ -198,46 +196,6 @@ class ConfigManager:
         if not (getattr(config, "hotkey_paste", "") or "").strip():
             config.hotkey_paste = "alt+h"
             changed = True
-        # if not (getattr(config, "hotkey_main", "") or "").strip():
-        #     config.hotkey_main = "alt+space"
-        #     changed = True
-        # if not (getattr(config, "hotkey_selection", "") or "").strip():
-        #     config.hotkey_selection = "alt+q"
-        #     changed = True
-        # if not (getattr(config, "hotkey_screenshot", "") or "").strip():
-        #     config.hotkey_screenshot = "alt+w"
-        #     changed = True
-        # if not (getattr(config, "hotkey_speech", "") or "").strip():
-        #     config.hotkey_speech = "alt+e"
-        #     changed = True
-
-        # # 老版本没有该字段时，强制回到经典默认尺寸（避免保留曾经的过宽窗口）。
-        # if not bool(getattr(config, "window_size_initialized", False)):
-        #     if getattr(config, "window_width", None) != 450:
-        #         config.window_width = 450
-        #         changed = True
-        #     if getattr(config, "window_height", None) != 660:
-        #         config.window_height = 660
-        #         changed = True
-        #     config.window_size_initialized = True
-        #     changed = True
-        # else:
-        #     try:
-        #         width = int(getattr(config, "window_width", 450))
-        #     except Exception:
-        #         width = 450
-        #     try:
-        #         height = int(getattr(config, "window_height", 660))
-        #     except Exception:
-        #         height = 660
-        #     clamped_width = min(max(width, 420), 1200)
-        #     clamped_height = min(max(height, 520), 1400)
-        #     if getattr(config, "window_width", None) != clamped_width:
-        #         config.window_width = clamped_width
-        #         changed = True
-        #     if getattr(config, "window_height", None) != clamped_height:
-        #         config.window_height = clamped_height
-        #         changed = True
 
         rag_key = str(getattr(config, "rag_embedding_api_key", "") or "")
         rag_key_is_ascii = True
