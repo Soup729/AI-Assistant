@@ -128,6 +128,7 @@ class AppController(QObject):
         self.main_window.source_link_signal.connect(self._on_source_link_clicked)
 
         self.settings_window.config_updated.connect(self.on_config_updated)
+        self.settings_window.preview_updated.connect(self.main_window.preview_ui)
 
         self.ocr_result_signal.connect(self.on_ocr_result_ready)
         self.ocr_status_signal.connect(self.main_window.set_ocr_status)
@@ -736,6 +737,9 @@ class AppController(QObject):
         if scope in ("general", "model"):
             self._load_models()
             self._create_task(self._preload_background_services_async(), "配置热更新预加载")
+
+        if scope in ("general", "ui"):
+            self.main_window.refresh_material()
 
         if scope == "general":
             logger.info("配置已动态更新")

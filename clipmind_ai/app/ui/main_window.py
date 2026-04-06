@@ -35,6 +35,14 @@ from PySide6.QtWidgets import (
 from app.storage.config import config_manager
 from app.utils.logger import logger
 from app.utils.runtime_paths import get_project_root
+from app.utils.mica import (
+    apply_window_material,
+    get_windows_version_info,
+    is_mica_supported,
+    is_mica_alt_supported,
+    is_acrylic_supported,
+    is_blur_supported,
+)
 
 
 
@@ -72,7 +80,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ClipMind AI")
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.95)
+        self._apply_window_opacity()
         self.setMinimumSize(450, 560)
 
         # 恢复窗口位置和大小
@@ -80,6 +88,166 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._setup_style()
+        self._apply_mica_material()
+
+    def _apply_mica_material(self):
+        """应用 Mica/Acrylic 毛玻璃材质（如果配置启用且系统支持）。"""
+        material = getattr(config_manager.config, "ui_material", "none")
+        if material == "none":
+            return
+
+        hwnd = int(self.winId())
+        apply_window_material(hwnd, material)
+
+    def _apply_window_opacity(self):
+        """根据配置设置窗口透明度。"""
+        bg_opacity = getattr(config_manager.config, "background_opacity", 255)
+        self.setWindowOpacity(bg_opacity / 255.0)
+
+    def _build_stylesheet(self, material: str, bg_opacity: int) -> str:
+        """根据材质类型和透明度生成 stylesheet。"""
+        if material in ("mica", "mica_alt", "acrylic", "blur"):
+            bg_r, bg_g, bg_b = 20, 20, 20
+            bg_alpha = max(1, bg_opacity)
+            central_bg = f"rgba({bg_r}, {bg_g}, {bg_b}, {bg_alpha})"
+            title_border = "rgba(255, 255, 255, 20)"
+            text_dark = "rgba(240, 240, 240, 230)"
+            text_light = "rgba(180, 180, 180, 200)"
+            input_bg = f"rgba({bg_r + 15}, {bg_g + 15}, {bg_b + 15}, {bg_alpha})"
+        else:
+            central_bg = f"rgba(255, 255, 255, {bg_opacity})"
+            title_border = "rgba(230, 230, 230, 150)"
+            text_dark = "#333333"
+            text_light = "#666666"
+            input_bg = f"rgba(255, 255, 255, 180)"
+
+        return f"""
+            #centralWidget {{
+                background-color: {central_bg};
+                border: 1px solid rgba(200, 200, 200, 150);
+                border-radius: 12px;
+            }}
+            #titleBar {{
+                background-color: transparent;
+                border-bottom: 1px solid {title_border};
+                margin-bottom: 5px;
+            }}
+            #titleLabel {{
+                font-weight: bold;
+                font-size: 16px;
+                color: {text_dark};
+                font-family: "Segoe UI", "Microsoft YaHei";
+            }}
+            #sectionLabel {{
+                color: {text_light};
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 2px;
+            }}
+            #btnTitle, #btnClose {{
+                border: none;
+                background: transparent;
+                font-size: 20px;
+                color: {text_light};
+                border-radius: 4px;
+            }}
+            #btnClose:hover {{
+                background-color: #ff4d4f;
+                color: white;
+            }}
+            #btnTitle:hover {{
+                background-color: rgba(255, 255, 255, 30);
+            }}
+            QTextEdit#inputText, QTextBrowser#outputText {{
+                background-color: {input_bg};
+                border: 1px solid rgba(220, 220, 220, 200);
+                border-radius: 8px;
+                padding: 10px;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+                font-size: 14px;
+                color: {text_dark};
+            }}
+            QTextBrowser#outputText a {{
+                color: #40a9ff;
+                text-decoration: none;
+            }}
+            QTextBrowser#outputText a:hover {{
+                color: #69c0ff;
+                text-decoration: underline;
+            }}
+            QComboBox {{
+                background-color: {input_bg};
+                border: 1px solid rgba(220, 220, 220, 200);
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 13px;
+                color: {text_dark};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            #ocrStatusLabel, #speechStatusLabel, #ragStatusLabel, #searchStatusLabel {{
+                color: {text_light};
+                font-size: 12px;
+                padding: 3px 10px 3px 10px;
+                border: 1px solid rgba(200, 200, 200, 150);
+                border-radius: 4px;
+                background-color: rgba(245, 245, 245, 80);
+            }}
+            #responseStatusLabel {{
+                color: {text_light};
+                font-size: 12px;
+                padding: 2px 4px 2px 4px;
+            }}
+            QPushButton#btnAction {{
+                padding: 6px 12px;
+                border-radius: 6px;
+                background-color: rgba(245, 245, 245, 200);
+                border: 1px solid rgba(210, 210, 210, 150);
+                font-size: 13px;
+                color: {text_light};
+            }}
+            QPushButton#btnAction:hover {{
+                background-color: rgba(255, 255, 255, 220);
+                border-color: #1890ff;
+                color: #1890ff;
+            }}
+            #btnSend {{
+                padding: 8px 20px;
+                background-color: #1890ff;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            #btnSend:hover {{
+                background-color: #40a9ff;
+            }}
+            #btnSend:disabled {{
+                background-color: #bfbfbf;
+            }}
+            #sizeGrip {{
+                width: 16px;
+                height: 16px;
+                background-color: transparent;
+                border: none;
+            }}
+        """
+
+    def preview_ui(self, material: str, opacity: int):
+        """实时预览材质和透明度（不持久化到配置）。"""
+        hwnd = int(self.winId())
+
+        # 预览 setWindowOpacity
+        self.setWindowOpacity(opacity / 255.0)
+
+        # 预览 DWM 材质（silent=True 不写日志，避免控制台刷屏）
+        if material != "none":
+            apply_window_material(hwnd, material, silent=True)
+
+        # 预览 stylesheet
+        self.setStyleSheet(self._build_stylesheet(material, opacity))
 
     def _init_ui(self):
         self.central_widget = QWidget()
@@ -153,7 +321,7 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         self.btn_copy = QPushButton("复制结果")
         self.btn_copy.setObjectName("btnAction")
-        self.btn_send = QPushButton("发送 (Enter)")
+        self.btn_send = QPushButton("发送提问")
         self.btn_send.setObjectName("btnSend")
         self.btn_send.setCursor(Qt.PointingHandCursor)
 
@@ -182,126 +350,14 @@ class MainWindow(QMainWindow):
         # 添加窗口大小调整把手
         self.size_grip = QSizeGrip(self)
         self.size_grip.setObjectName("sizeGrip")
-        size_grip_layout = QHBoxLayout()
-        size_grip_layout.addStretch()
-        size_grip_layout.addWidget(self.size_grip)
-        layout.addLayout(size_grip_layout)
+        self.size_grip.setFixedSize(16, 16)
+        self.size_grip.move(self.width() - 20, self.height() - 20)
+        self.size_grip.raise_()
 
     def _setup_style(self):
-        self.setStyleSheet(
-            """
-            #centralWidget {
-                background-color: rgba(255, 255, 255, 230);
-                border: 1px solid rgba(200, 200, 200, 150);
-                border-radius: 12px;
-            }
-            #titleBar {
-                background-color: transparent;
-                border-bottom: 1px solid rgba(230, 230, 230, 150);
-                margin-bottom: 5px;
-            }
-            #titleLabel {
-                font-weight: bold;
-                font-size: 16px;
-                color: #333333;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }
-            #sectionLabel {
-                color: #444444;
-                font-size: 12px;
-                font-weight: 600;
-                padding-left: 2px;
-            }
-            #btnTitle, #btnClose {
-                border: none;
-                background: transparent;
-                font-size: 20px;
-                color: #666666;
-                border-radius: 4px;
-            }
-            #btnClose:hover {
-                background-color: #ff4d4f;
-                color: white;
-            }
-            #btnTitle:hover {
-                background-color: #e6e6e6;
-            }
-            QTextEdit#inputText, QTextBrowser#outputText {
-                background-color: rgba(255, 255, 255, 180);
-                border: 1px solid rgba(220, 220, 220, 200);
-                border-radius: 8px;
-                padding: 10px;
-                font-family: 'Segoe UI', 'Microsoft YaHei';
-                font-size: 14px;
-                color: #333333;
-            }
-            QTextBrowser#outputText a {
-                color: #1890ff;
-                text-decoration: none;
-            }
-            QTextBrowser#outputText a:hover {
-                color: #40a9ff;
-                text-decoration: underline;
-            }
-            QComboBox {
-                background-color: rgba(255, 255, 255, 180);
-                border: 1px solid rgba(220, 220, 220, 200);
-                border-radius: 6px;
-                padding: 5px 10px;
-                font-size: 13px;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            #ocrStatusLabel, #speechStatusLabel, #ragStatusLabel, #searchStatusLabel {
-                color: #888888;
-                font-size: 12px;
-                padding: 3px 10px 3px 10px;
-                border: 1px solid rgba(200, 200, 200, 150);
-                border-radius: 4px;
-                background-color: rgba(245, 245, 245, 180);
-            }
-            #responseStatusLabel {
-                color: #666666;
-                font-size: 12px;
-                padding: 2px 4px 2px 4px;
-            }
-            QPushButton#btnAction {
-                padding: 6px 12px;
-                border-radius: 6px;
-                background-color: rgba(245, 245, 245, 200);
-                border: 1px solid rgba(210, 210, 210, 150);
-                font-size: 13px;
-                color: #555555;
-            }
-            QPushButton#btnAction:hover {
-                background-color: #ffffff;
-                border-color: #1890ff;
-                color: #1890ff;
-            }
-            #btnSend {
-                padding: 8px 20px;
-                background-color: #1890ff;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            #btnSend:hover {
-                background-color: #40a9ff;
-            }
-            #btnSend:disabled {
-                background-color: #bfbfbf;
-            }
-            #sizeGrip {
-                width: 16px;
-                height: 16px;
-                background-color: transparent;
-                border: none;
-            }
-            """
-        )
+        material = getattr(config_manager.config, "ui_material", "none")
+        bg_opacity = getattr(config_manager.config, "background_opacity", 255)
+        self.setStyleSheet(self._build_stylesheet(material, bg_opacity))
 
     def _emit_model_changed(self, index: int):
         model_id = self.combo_model.itemData(index)
@@ -464,6 +520,13 @@ class MainWindow(QMainWindow):
         """窗口大小变化后保存大小"""
         super().resizeEvent(event)
         self._save_geometry()
+        self.size_grip.move(self.width() - 20, self.height() - 20)
+
+    def refresh_material(self):
+        """动态刷新毛玻璃材质和样式（在设置保存后由 AppController 调用）。"""
+        self._apply_mica_material()
+        self._apply_window_opacity()
+        self._setup_style()
 
     def closeEvent(self, event):
         self.request_exit_signal.emit()

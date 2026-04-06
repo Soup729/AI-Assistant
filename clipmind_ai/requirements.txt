@@ -23,3 +23,4 @@ pydantic>=2.5.3
 loguru>=0.7.2
 sqlalchemy>=2.0.25
 pyinstaller>=6.3.0
+win32mica>=1.4.0

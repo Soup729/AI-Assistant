@@ -14,6 +14,7 @@ binaries = []
 hiddenimports = [
     # Windows 系统交互
     'win32clipboard', 'win32con', 'win32api', 'win32gui', 'win32process',
+    'win32mica',
     'keyboard',
     # Qt + asyncio 集成
     'qasync',

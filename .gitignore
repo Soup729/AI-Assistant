@@ -31,3 +31,5 @@ config.json
 clipmind_ai/assets/speech_models/
 clipmind_ai/assets/notes/
 .tmp_legacy_config.json
+.codebuddy/rules/同步更新README和打包文件.mdc
+UI.md

@@ -1,4 +1,4 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QDoubleSpinBox,
+    QSlider,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -21,11 +22,19 @@ from PySide6.QtWidgets import (
 
 from app.storage.config import ModelProfile, config, config_manager
 from app.storage.db import db_manager
+from app.utils.mica import (
+    is_mica_supported,
+    is_mica_alt_supported,
+    is_acrylic_supported,
+    is_blur_supported,
+)
 
 
 class SettingsWindow(QDialog):
     # scope: "model" | "template" | "hotkey" | "ocr" | "rag" | "speech" | "general"
     config_updated = Signal(str)
+    # material: "none" | "mica" | "acrylic",  opacity: 1-255
+    preview_updated = Signal(str, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -190,10 +199,31 @@ class SettingsWindow(QDialog):
         self.edit_search_key = QLineEdit()
         self.edit_search_key.setPlaceholderText("Tavily/Bing API Key")
 
-        # self.combo_ui_material = QComboBox()
-        # self.combo_ui_material.addItem("关闭特效（兼容模式）", "none")
-        # self.combo_ui_material.addItem("Windows 11 云母（Mica）", "mica")
-        # self.combo_ui_material.addItem("Windows 11 亚克力（Acrylic）", "acrylic")
+        self.slider_bg_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_bg_opacity.setRange(1, 255)
+        self.slider_bg_opacity.setValue(255)
+        self.slider_bg_opacity.setToolTip("调整窗口背景透明度，配合桌面壁纸达到最佳显示效果")
+        self.label_bg_opacity_value = QLabel("255")
+        self.slider_bg_opacity.valueChanged.connect(
+            lambda v: self.label_bg_opacity_value.setText(str(v))
+        )
+        self.slider_bg_opacity.valueChanged.connect(
+            lambda v: self.preview_updated.emit(
+                self.combo_ui_material.currentData() or "none", v
+            )
+        )
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(self.slider_bg_opacity)
+        opacity_row.addWidget(self.label_bg_opacity_value)
+
+        self.combo_ui_material = QComboBox()
+        self._populate_material_combo()
+        self.combo_ui_material.currentIndexChanged.connect(
+            lambda _: self.preview_updated.emit(
+                self.combo_ui_material.currentData() or "none",
+                self.slider_bg_opacity.value(),
+            )
+        )
 
         self.combo_ocr_engine = QComboBox()
         self.combo_ocr_engine.addItem("本地 RapidOCR", "rapid")
@@ -239,9 +269,9 @@ class SettingsWindow(QDialog):
         ocr_tips = QLabel("RapidOCR 已替代旧 OCR 引擎，更轻更快；混合模式会在必要时调用云端 OCR。")
         ocr_tips.setWordWrap(True)
         ocr_tips.setStyleSheet("color: #666; font-size: 12px;")
-        # material_tip = QLabel("窗口材质建议在 Windows 11 下开启；若兼容性不佳可切回“关闭特效”。")
-        # material_tip.setWordWrap(True)
-        # material_tip.setStyleSheet("color: #666; font-size: 12px;")
+        material_tip = QLabel("窗口材质建议在 Windows 11 下开启；若兼容性不佳可切回「关闭特效」。Acrylic 支持 Windows 10。")
+        material_tip.setWordWrap(True)
+        material_tip.setStyleSheet("color: #666; font-size: 12px;")
         cloud_tip = QLabel(
             "云端 OCR API 默认使用 multipart/form-data 上传 image_file；若返回字段较特殊，可在结果文本路径里填写 data.text / text / result。"
         )
@@ -258,8 +288,9 @@ class SettingsWindow(QDialog):
 
         form.addRow(self.check_search)
         form.addRow("搜索 API Key:", self.edit_search_key)
-        # form.addRow("窗口材质:", self.combo_ui_material)
-        # form.addRow(material_tip)
+        form.addRow("窗口材质:", self.combo_ui_material)
+        form.addRow("背景透明度:", opacity_row)
+        form.addRow(material_tip)
         form.addRow("OCR 引擎:", self.combo_ocr_engine)
         form.addRow("云端 OCR 地址:", self.edit_ocr_cloud_url)
         form.addRow("云端 API Key:", self.edit_ocr_cloud_key)
@@ -277,6 +308,31 @@ class SettingsWindow(QDialog):
         form.addRow("Embedding 模型:", self.edit_rag_embedding_model)
         form.addRow(rag_tips)
 
+    def _populate_material_combo(self):
+        """填充窗口材质下拉框，根据系统支持情况动态启用选项。"""
+        self.combo_ui_material.blockSignals(True)
+        self.combo_ui_material.clear()
+        self.combo_ui_material.addItem("关闭特效（兼容模式）", "none")
+
+        blur_supported = is_blur_supported()
+        if blur_supported:
+            self.combo_ui_material.addItem("纯净毛玻璃（Blur）", "blur")
+        if is_acrylic_supported():
+            self.combo_ui_material.addItem("亚克力（Acrylic）", "acrylic")
+        if is_mica_alt_supported():
+            self.combo_ui_material.addItem("深度云母（Mica Alt）", "mica_alt")
+        if is_mica_supported():
+            self.combo_ui_material.addItem("云母（Mica）", "mica")
+
+        if not (blur_supported or is_acrylic_supported() or is_mica_supported()):
+            self.combo_ui_material.setEnabled(False)
+            self.slider_bg_opacity.setEnabled(False)
+        else:
+            self.combo_ui_material.setEnabled(True)
+            self.slider_bg_opacity.setEnabled(True)
+
+        self.combo_ui_material.blockSignals(False)
+
     def _load_config(self):
         self.edit_hk_main.setText(config.hotkey_main)
         self.edit_hk_selection.setText(config.hotkey_selection)
@@ -286,8 +342,10 @@ class SettingsWindow(QDialog):
 
         self.check_search.setChecked(config.enable_search)
         self.edit_search_key.setText(config.search_api_key)
-        # material_index = self.combo_ui_material.findData(getattr(config, "ui_material", "none"))
-        # self.combo_ui_material.setCurrentIndex(max(0, material_index))
+        material_index = self.combo_ui_material.findData(getattr(config, "ui_material", "none"))
+        self.combo_ui_material.setCurrentIndex(max(0, material_index))
+        self.slider_bg_opacity.setValue(int(getattr(config, "background_opacity", 255)))
+        self.label_bg_opacity_value.setText(str(getattr(config, "background_opacity", 255)))
 
         self.edit_ocr_cloud_url.setText(getattr(config, "ocr_cloud_api_url", ""))
         self.edit_ocr_cloud_key.setText(getattr(config, "ocr_cloud_api_key", ""))
@@ -439,7 +497,7 @@ class SettingsWindow(QDialog):
         if profile is None:
             return
 
-        answer = QMessageBox.question(self, "确认", f"确认删除模型档案 “{profile.display_name}” 吗？")
+        answer = QMessageBox.question(self, "确认", f"确认删除模型档案「{profile.display_name}」吗？")
         if answer != QMessageBox.Yes:
             return
 
@@ -487,7 +545,7 @@ class SettingsWindow(QDialog):
         if index < 0:
             return
         name = self.template_list.currentItem().text()
-        answer = QMessageBox.question(self, "确认", f"确认删除模板 “{name}” 吗？")
+        answer = QMessageBox.question(self, "确认", f"确认删除模板「{name}」吗？")
         if answer != QMessageBox.Yes:
             return
         with db_manager._get_connection() as conn:
@@ -534,6 +592,8 @@ class SettingsWindow(QDialog):
             "hotkey_paste": self.edit_hk_paste.text().strip(),
             "enable_search": self.check_search.isChecked(),
             "search_api_key": self.edit_search_key.text().strip(),
+            "ui_material": self.combo_ui_material.currentData(),
+            "background_opacity": self.slider_bg_opacity.value(),
             "ocr_engine": self.combo_ocr_engine.currentData(),
             "ocr_cloud_api_url": self.edit_ocr_cloud_url.text().strip(),
             "ocr_cloud_api_key": self.edit_ocr_cloud_key.text().strip(),
@@ -567,6 +627,9 @@ class SettingsWindow(QDialog):
         # RAG变更
         if any(old_vals.get(k) != new_values[k] for k in ("enable_rag", "rag_notes_dir", "rag_embedding_api_url", "rag_embedding_api_key", "rag_embedding_model")):
             changed_scopes.add("rag")
+        # UI材质/透明度变更
+        if old_vals.get("ui_material") != new_values["ui_material"] or old_vals.get("background_opacity") != new_values["background_opacity"]:
+            changed_scopes.add("ui")
 
         # 如果没有任何明确识别的变更，但有值不同，仍触发general
         if not changed_scopes:

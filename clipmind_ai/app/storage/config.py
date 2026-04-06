@@ -55,6 +55,7 @@ class AppConfig(BaseModel):
     theme: str = Field(default="light")
     window_opacity: float = Field(default=0.95)
     ui_material: str = Field(default="none")
+    background_opacity: int = Field(default=255)  # 窗口背景透明度 0-255，Mica/Acrylic 下建议低值
     window_geometry: str = Field(default="")  # 窗口位置和大小 JSON
 
     # OCR.
@@ -115,7 +116,7 @@ class ConfigManager:
 
     def _normalize_ui_material(self, value: str) -> str:
         normalized = (value or "none").strip().lower()
-        if normalized in {"none", "mica", "acrylic"}:
+        if normalized in {"none", "mica", "mica_alt", "acrylic", "blur"}:
             return normalized
         return "none"
 
@@ -173,6 +174,11 @@ class ConfigManager:
         normalized_material = self._normalize_ui_material(getattr(config, "ui_material", "none"))
         if config.ui_material != normalized_material:
             config.ui_material = normalized_material
+            changed = True
+
+        bg_opacity = getattr(config, "background_opacity", None)
+        if bg_opacity is None or not isinstance(bg_opacity, int) or bg_opacity < 0 or bg_opacity > 255:
+            config.background_opacity = 255
             changed = True
 
         if not getattr(config, "ocr_cloud_image_field", "").strip():
