@@ -1,27 +1,13 @@
 import asyncio
-import gc
 import json
-import sys
-import traceback
+import queue
+import threading
 from typing import AsyncGenerator, Dict, Generator, List, Optional
 
 import httpx
 
 from app.storage.config import ModelProfile, config_manager
 from app.utils.logger import logger
-
-
-def _check_event_loop() -> bool:
-    """检查是否有可用的事件循环"""
-    try:
-        if sys.version_info >= (3, 10):
-            import asyncio
-            asyncio.get_running_loop()
-        else:
-            asyncio.get_event_loop()
-        return True
-    except RuntimeError:
-        return False
 
 
 class LLMClient:
@@ -62,6 +48,18 @@ class LLMClient:
         messages: List[Dict[str, str]],
         model_profile: Optional[ModelProfile] = None,
     ) -> AsyncGenerator[str, None]:
+        """
+        使用同步 httpx + run_in_executor 实现流式请求。
+
+        原因：httpx AsyncClient 在任务取消时，其内部的 aclose() coroutine 对象
+        被 Python GC 回收，Python runtime 的 coroutine.__del__ 在无 event loop
+        的上下文中执行 httpx 清理代码，导致：
+        - "async generator ignored GeneratorExit"
+        - "no running event loop"
+
+        改用同步 httpx：所有网络操作在独立线程中，close() 是普通方法调用，
+        无 coroutine 对象，无任何 async 清理问题。
+        """
         profile = self._profile(model_profile)
         api_url = self._build_chat_url(profile.api_base_url)
         headers = {
@@ -72,104 +70,94 @@ class LLMClient:
 
         logger.info(f"请求模型接口: {api_url}, 模型: {profile.display_name} / {profile.model_name}")
 
-        # 手动管理资源，不使用 stream() 上下文管理器
-        # 这样可以更精确地控制清理时机
-        client: httpx.AsyncClient | None = None
-        response: httpx.Response | None = None
-        line_iter: AsyncGenerator[str, None] | None = None
+        chunk_queue: queue.Queue = queue.Queue()
+        thread_done = threading.Event()
+        error_info = {"error": None}
+        should_stop = False
+
+        def _sync_stream():
+            """在独立线程中执行同步 httpx 流式请求"""
+            try:
+                with httpx.stream(
+                    "POST",
+                    api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=60.0,
+                    follow_redirects=True,
+                ) as response:
+                    if response.status_code != 200:
+                        raw = response.read().decode(errors="ignore")
+                        error_msg = self._error_message_from_response(raw, response.status_code)
+                        logger.error(f"API 请求失败: {error_msg}")
+                        error_info["error"] = f"Error: API 请求失败 ({error_msg})"
+                        return
+
+                    for line in response.iter_lines():
+                        if should_stop:
+                            break
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+
+                        try:
+                            data = json.loads(data_str)
+                        except Exception:
+                            continue
+
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            try:
+                                chunk_queue.put(content, timeout=0.5)
+                            except queue.Full:
+                                # 主线程消费太慢，停止发送
+                                break
+            except Exception as e:
+                logger.error(f"同步流线程异常: {e}")
+                error_info["error"] = f"Error: 发生意外错误 ({str(e)})"
+            finally:
+                thread_done.set()
 
         try:
-            client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
-            response = await client.post(api_url, headers=headers, json=payload)
+            thread = threading.Thread(target=_sync_stream, daemon=True)
+            thread.start()
 
-            if response.status_code != 200:
-                raw = response.text.encode() if isinstance(response.text, str) else response.text
-                error_msg = self._error_message_from_response(raw.decode(errors="ignore"), response.status_code)
-                logger.error(f"API 请求失败: {error_msg}")
-                yield f"Error: API 请求失败 ({error_msg})"
-                return
-
-            # 获取行迭代器
-            line_iter = response.aiter_lines()
-            async for line in line_iter:
-                # 让出控制权，确保取消信号能及时传播
-                await asyncio.sleep(0)
-
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[6:]
-                if data_str.strip() == "[DONE]":
-                    break
-
+            while True:
                 try:
-                    data = json.loads(data_str)
-                except Exception:
-                    continue
-
-                choices = data.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    yield content
-
+                    chunk = await asyncio.wait_for(
+                        asyncio.get_running_loop().run_in_executor(
+                            None, chunk_queue.get, True, 0.05
+                        ),
+                        timeout=1.0,
+                    )
+                    yield chunk
+                except asyncio.TimeoutError:
+                    # 定期让出控制权，检查取消信号
+                    await asyncio.sleep(0)
+                    if thread_done.is_set() and chunk_queue.empty():
+                        break
+                except queue.Empty:
+                    if thread_done.is_set():
+                        break
         except asyncio.CancelledError:
+            should_stop = True
             logger.debug("LLM 流式请求被取消")
+            if thread.is_alive():
+                thread.join(timeout=1.0)
             raise
-        except httpx.ConnectError:
-            logger.error("无法连接到模型服务")
-            yield "Error: 无法连接到模型服务，请检查 API 地址或网络代理。"
-        except httpx.TimeoutException:
-            logger.error("模型请求超时")
-            yield "Error: 模型请求超时，请稍后重试。"
-        except Exception as e:
-            logger.error(f"模型请求异常: {e}")
-            yield f"Error: 发生意外错误 ({str(e)})"
         finally:
-            # 清理资源：按照创建的反序释放
-            # 注意：这里的清理可能在没有事件循环的上下文中被调用
-            # 因此使用 run_coroutine_threadsafe 或检查事件循环
-            if line_iter is not None:
-                try:
-                    # 尝试关闭行迭代器
-                    if hasattr(line_iter, 'aclose'):
-                        aclose = line_iter.aclose()
-                        if asyncio.iscoroutine(aclose):
-                            # 如果事件循环可用，await 协程
-                            if _check_event_loop():
-                                try:
-                                    await aclose
-                                except asyncio.CancelledError:
-                                    pass
-                                except RuntimeError as e:
-                                    if "no running event loop" not in str(e):
-                                        raise
-                                except Exception:
-                                    pass
-                except RuntimeError as e:
-                    if "no running event loop" not in str(e):
-                        logger.warning(f"关闭行迭代器时异常: {e}")
-                except Exception as e:
-                    logger.warning(f"关闭行迭代器时异常: {e}")
+            should_stop = True
+            if thread.is_alive():
+                thread.join(timeout=1.0)
 
-            if response is not None:
-                try:
-                    response.close()
-                except Exception:
-                    pass
-
-            if client is not None:
-                try:
-                    await client.aclose()
-                except RuntimeError as e:
-                    if "no running event loop" not in str(e):
-                        logger.warning(f"关闭客户端时异常: {e}")
-                except Exception:
-                    pass
-
-            # 强制垃圾回收以确保生成器被正确清理
-            gc.collect()
+        if error_info["error"]:
+            yield error_info["error"]
 
     def chat_stream(
         self,

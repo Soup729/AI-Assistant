@@ -46,6 +46,11 @@ class AppConfig(BaseModel):
     hotkey_screenshot: str = Field(default="alt+w")
     hotkey_speech: str = Field(default="alt+e")
     hotkey_paste: str = Field(default="alt+h")
+    hotkey_send: str = Field(default="alt+k")
+    hotkey_scroll_up: str = Field(default="alt+up")
+    hotkey_scroll_down: str = Field(default="alt+down")
+    hotkey_clear_input: str = Field(default="alt+del")
+    hotkey_delete_char: str = Field(default="alt+backspace")
 
     # Web search.
     enable_search: bool = Field(default=False)
@@ -75,6 +80,10 @@ class AppConfig(BaseModel):
     rag_embedding_api_url: str = Field(default="https://api.openai.com/v1")
     rag_embedding_api_key: str = Field(default="")
     rag_embedding_model: str = Field(default="text-embedding-3-small")
+
+    # Output rendering.
+    enable_markdown_render: bool = Field(default=True)
+    enable_code_highlight: bool = Field(default=True)
 
 
 class ConfigManager:
@@ -201,6 +210,26 @@ class ConfigManager:
 
         if not (getattr(config, "hotkey_paste", "") or "").strip():
             config.hotkey_paste = "alt+h"
+            changed = True
+
+        if not (getattr(config, "hotkey_send", "") or "").strip():
+            config.hotkey_send = "alt+k"
+            changed = True
+
+        if not (getattr(config, "hotkey_scroll_up", "") or "").strip():
+            config.hotkey_scroll_up = "alt+up"
+            changed = True
+
+        if not (getattr(config, "hotkey_scroll_down", "") or "").strip():
+            config.hotkey_scroll_down = "alt+down"
+            changed = True
+
+        if not (getattr(config, "hotkey_clear_input", "") or "").strip():
+            config.hotkey_clear_input = "alt+del"
+            changed = True
+
+        if not (getattr(config, "hotkey_delete_char", "") or "").strip():
+            config.hotkey_delete_char = "alt+backspace"
             changed = True
 
         rag_key = str(getattr(config, "rag_embedding_api_key", "") or "")

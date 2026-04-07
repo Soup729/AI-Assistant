@@ -1,4 +1,5 @@
 import ctypes
+import html
 import sys
 from typing import Any, Iterable
 
@@ -14,7 +15,16 @@ from PySide6.QtCore import (
     Slot,
     QRect,
 )
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QConicalGradient,
+    QFont,
+    QFontDatabase,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -35,6 +45,7 @@ from PySide6.QtWidgets import (
 from app.storage.config import config_manager
 from app.utils.logger import logger
 from app.utils.runtime_paths import get_project_root
+from app.utils.markdown_renderer import render_markdown
 from app.utils.mica import (
     apply_window_material,
     get_windows_version_info,
@@ -44,6 +55,91 @@ from app.utils.mica import (
     is_blur_supported,
 )
 
+
+
+class BorderFrame(QWidget):
+    """透明边框流光层：仅负责绘制极细的 RGB 渐变走马灯，不阻挡任何鼠标事件。"""
+
+    BORDER_WIDTH = 2   # 边框宽度（像素）
+    TIMER_INTERVAL = 30  # ms，~33fps 足够丝滑
+
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        # 盖满父窗口
+        self._resize_to_parent()
+        # 动画状态
+        self._elapsed_ms = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TIMER_INTERVAL)
+        self._timer.timeout.connect(self._on_tick)
+        self._flow_colors = [
+            QColor(255, 100, 180),   # 粉色
+            QColor(100, 140, 255),   # 蓝紫
+            QColor(60, 200, 220),    # 青色
+            QColor(80, 230, 120),    # 翠绿
+            QColor(255, 210, 60),    # 金黄
+            QColor(255, 130, 60),    # 橙色
+            QColor(255, 80, 100),    # 珊瑚红
+        ]
+        self._flow_speed = 25  # 每秒流动的角度（度）
+
+    def _resize_to_parent(self):
+        if self.parent():
+            self.setGeometry(self.parent().rect())
+
+    def _on_tick(self):
+        self._elapsed_ms += self.TIMER_INTERVAL
+        self.update()  # 仅更新自己，极低 CPU 消耗
+
+    def paintEvent(self, event):
+        geo = self.rect()
+        pad = self.BORDER_WIDTH // 2
+        rect = geo.adjusted(pad, pad, -pad, -pad)
+
+        # 用 QConicalGradient 实现旋转流光
+        cx = rect.center().x()
+        cy = rect.center().y()
+        angle_deg = (self._elapsed_ms * self._flow_speed) % 360
+        gradient = QConicalGradient(cx, cy, angle_deg)
+        gradient.setCoordinateMode(QConicalGradient.CoordinateMode.ObjectBoundingMode)
+
+        num = len(self._flow_colors)
+        for i, color in enumerate(self._flow_colors):
+            gradient.setColorAt(i / num, color)
+
+        pen = QPen()
+        pen.setWidthF(self.BORDER_WIDTH)
+        pen.setBrush(gradient)   # 用 brush 而非 setColor，渐变通过 brush 传入
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 12, 12)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        painter.end()
+
+    def start_flow(self):
+        """启动流光动画。"""
+        if self._timer.isActive():
+            return
+        self._elapsed_ms = 0
+        self._timer.start()
+        self.show()
+
+    def stop_flow(self):
+        """立即停止动画并隐藏。"""
+        if self._timer.isActive():
+            self._timer.stop()
+        self._elapsed_ms = 0
+        self.hide()
+        self.update()  # 清除残留
 
 
 class DraggableTitleBar(QFrame):
@@ -80,6 +176,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ClipMind AI")
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)  # 显示但不抢夺键盘焦点
         self._apply_window_opacity()
         self.setMinimumSize(450, 560)
 
@@ -166,6 +263,14 @@ class MainWindow(QMainWindow):
                 font-family: 'Segoe UI', 'Microsoft YaHei';
                 font-size: 14px;
                 color: {text_dark};
+            }}
+            QTextBrowser#outputText {{
+                font-size: 13px;
+                line-height: 1;
+            }}
+            QTextBrowser#outputText p {{
+                margin-top: 6px;
+                margin-bottom: 6px;
             }}
             QTextBrowser#outputText a {{
                 color: #40a9ff;
@@ -307,10 +412,25 @@ class MainWindow(QMainWindow):
         self.response_status_label = QLabel("状态：等待发送")
         self.response_status_label.setObjectName("responseStatusLabel")
 
+        # ✨ 思考动画图标（QGraphicsOpacityEffect + QPropertyAnimation）
+        self.thinking_icon = QLabel("✨")
+        self.thinking_icon.setObjectName("thinkingIcon")
+        self.thinking_icon.setFixedWidth(20)
+        self.thinking_icon.setAlignment(Qt.AlignCenter)
+        self._thinking_opacity = QGraphicsOpacityEffect(self.thinking_icon)
+        self._thinking_opacity.setOpacity(0.0)
+        self.thinking_icon.setGraphicsEffect(self._thinking_opacity)
+        self._thinking_anim = QPropertyAnimation(self._thinking_opacity, b"opacity")
+        self._thinking_anim.setDuration(800)
+        self._thinking_anim.setStartValue(0.0)
+        self._thinking_anim.setEndValue(1.0)
+        self._thinking_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._thinking_anim.setLoopCount(-1)  # 无限循环，ping-pong 由 direction 控制
+
         self.input_text = QTextEdit()
         self.input_text.setObjectName("inputText")
         self.input_text.setPlaceholderText("在这里输入问题，或粘贴选中的文本...")
-        self.input_text.setMaximumHeight(120)
+        self.input_text.setMaximumHeight(80)
 
         self.output_text = QTextBrowser()
         self.output_text.setObjectName("outputText")
@@ -329,7 +449,7 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_send)
 
-        # 状态栏：OCR、语音、RAG、搜索 一行排列，AI状态单独一行
+        # 状态栏：OCR、语音、RAG、搜索 一行排列
         status_layout = QHBoxLayout()
         status_layout.addWidget(self.ocr_status_label)
         status_layout.addWidget(self.speech_status_label)
@@ -337,12 +457,17 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.search_status_label)
         status_layout.addStretch()
 
+        # 状态文字行：状态 + ✨（最右侧）
+        response_layout = QHBoxLayout()
+        response_layout.addWidget(self.response_status_label, stretch=1)
+        response_layout.addWidget(self.thinking_icon)
+
         layout.addWidget(self.title_bar)
         layout.addWidget(self.model_label)
         layout.addWidget(self.combo_model)
         layout.addWidget(self.combo_template)
         layout.addLayout(status_layout)
-        layout.addWidget(self.response_status_label)
+        layout.addLayout(response_layout)
         layout.addWidget(self.input_text)
         layout.addWidget(self.output_text)
         layout.addLayout(btn_layout)
@@ -353,6 +478,10 @@ class MainWindow(QMainWindow):
         self.size_grip.setFixedSize(16, 16)
         self.size_grip.move(self.width() - 20, self.height() - 20)
         self.size_grip.raise_()
+
+        # 流光边框层（透明，盖在主窗口最上，鼠标穿透）
+        self.border_frame = BorderFrame(self)
+        self.border_frame.hide()
 
     def _setup_style(self):
         material = getattr(config_manager.config, "ui_material", "none")
@@ -419,18 +548,50 @@ class MainWindow(QMainWindow):
         self.combo_model.blockSignals(False)
 
     def append_output(self, text: str):
+        # 保存当前滚动位置，禁用自动滚动
+        scrollbar = self.output_text.verticalScrollBar()
+        scroll_pos = scrollbar.value()
         cursor = self.output_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(text)
         self.output_text.setTextCursor(cursor)
-        self.output_text.ensureCursorVisible()
+        scrollbar.setValue(scroll_pos)
+
+    def render_markdown(self, text: str):
+        """将 Markdown 渲染为高亮 HTML 并替换整个输出区。"""
+        # 保存当前滚动位置，禁用自动滚动
+        scrollbar = self.output_text.verticalScrollBar()
+        scroll_pos = scrollbar.value()
+
+        # 检查渲染设置
+        enable_md = getattr(config_manager.config, "enable_markdown_render", True)
+        enable_code = getattr(config_manager.config, "enable_code_highlight", True)
+
+        if not enable_md:
+            # 纯文本模式：仅转义显示
+            escaped = html.escape(text).replace("\n", "<br>")
+            html = f'<p style="margin:6px 0;color:#d0d0d0;line-height:1.7;">{escaped}</p>'
+        else:
+            # Markdown 渲染模式
+            html = render_markdown(text, enable_code_highlight=enable_code)
+
+        # 使用 QTextDocument.setHtml 完全替换内容，避免光标位置问题
+        doc = self.output_text.document()
+        doc.setHtml(html)
+        cursor = self.output_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.output_text.setTextCursor(cursor)
+        scrollbar.setValue(scroll_pos)
 
     def append_output_html(self, html: str):
+        # 保存当前滚动位置，禁用自动滚动
+        scrollbar = self.output_text.verticalScrollBar()
+        scroll_pos = scrollbar.value()
         cursor = self.output_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertHtml(html)
         self.output_text.setTextCursor(cursor)
-        self.output_text.ensureCursorVisible()
+        scrollbar.setValue(scroll_pos)
 
     def get_output_text(self) -> str:
         return self.output_text.toPlainText()
@@ -439,7 +600,7 @@ class MainWindow(QMainWindow):
         self.input_text.setPlainText(text)
         self.input_text.moveCursor(QTextCursor.End)
         self.show()
-        self.activateWindow()
+        # 仅调用 show()，不调用 activateWindow()/raise_() 以避免抢夺焦点
 
     def append_input(self, text: str):
         cursor = self.input_text.textCursor()
@@ -448,7 +609,7 @@ class MainWindow(QMainWindow):
         self.input_text.setTextCursor(cursor)
         self.input_text.ensureCursorVisible()
         self.show()
-        self.activateWindow()
+        # 仅调用 show()，不调用 activateWindow()/raise_() 以避免抢夺焦点
 
     def set_ocr_status(self, text: str):
         self.ocr_status_label.setText(f"OCR {text}")
@@ -464,6 +625,33 @@ class MainWindow(QMainWindow):
 
     def set_response_status(self, text: str):
         self.response_status_label.setText(f"状态：{text}")
+
+    # ------------------------------------------------------------------ #
+    #  思考动画：QGraphicsOpacityEffect + QPropertyAnimation (800ms)      #
+    # ------------------------------------------------------------------ #
+    def start_thinking_animation(self):
+        """启动 ✨ 呼吸动画（透明度 0 → 1 → 0 循环，ping-pong）。"""
+        if self._thinking_anim.state() == QPropertyAnimation.Running:
+            return
+        self._thinking_anim.setDirection(QPropertyAnimation.Forward)
+        self._thinking_anim.start()
+
+    def stop_thinking_animation(self):
+        """立即停止 ✨ 动画，透明度归零。"""
+        if self._thinking_anim.state() == QPropertyAnimation.Running:
+            self._thinking_anim.stop()
+        self._thinking_opacity.setOpacity(0.0)
+
+    # ------------------------------------------------------------------ #
+    #  边框流光动画：QConicalGradient + QTimer (30ms)                       #
+    # ------------------------------------------------------------------ #
+    def start_flow_animation(self):
+        """启动边框 RGB 流光动画。"""
+        self.border_frame.start_flow()
+
+    def stop_flow_animation(self):
+        """立即停止边框流光动画并隐藏。"""
+        self.border_frame.stop_flow()
 
     def _restore_geometry(self):
         """恢复窗口位置和大小"""
@@ -521,12 +709,36 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._save_geometry()
         self.size_grip.move(self.width() - 20, self.height() - 20)
+        self.border_frame.setGeometry(self.rect())
 
     def refresh_material(self):
         """动态刷新毛玻璃材质和样式（在设置保存后由 AppController 调用）。"""
         self._apply_mica_material()
         self._apply_window_opacity()
         self._setup_style()
+
+    def scroll_output_up(self):
+        self.output_text.verticalScrollBar().setValue(
+            self.output_text.verticalScrollBar().value() - self.output_text.viewport().height() // 4
+        )
+
+    def scroll_output_down(self):
+        self.output_text.verticalScrollBar().setValue(
+            self.output_text.verticalScrollBar().value() + self.output_text.viewport().height() // 4
+        )
+
+    def clear_input(self):
+        """清空输入框内容。"""
+        self.input_text.clear()
+
+    def delete_char(self):
+        """删除输入框末尾一个字符（Backspace）。"""
+        cursor = self.input_text.textCursor()
+        if cursor.hasSelection():
+            cursor.removeSelectedText()
+        else:
+            cursor.deletePreviousChar()
+        self.input_text.setTextCursor(cursor)
 
     def closeEvent(self, event):
         self.request_exit_signal.emit()

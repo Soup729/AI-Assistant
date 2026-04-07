@@ -28,6 +28,9 @@ hiddenimports = [
     'bs4', 'bs4.builder', 'trafilatura',
     # 数据库（SQLite FTS5 全文索引 + RAG 元数据）
     'sqlalchemy', 'sqlalchemy.ext.asyncio',
+    # Markdown 渲染与代码高亮
+    'mistune', 'mistune.renderers',
+    'pygments', 'pygments.formatters', 'pygments.lexers', 'pygments.util',
 ]
 legacy_paddle_packages = ('paddle' + 'ocr', 'paddle' + 'paddle', 'paddle' + 'x')
 for package_name in ('rapidocr_onnxruntime', 'rapidocr', 'sherpa_onnx', 'pyaudiowpatch', 'onnxruntime'):

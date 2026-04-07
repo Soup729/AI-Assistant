@@ -71,6 +71,13 @@ python -m PyInstaller --noconfirm --clean ClipMindAI.spec
 
 ## 📝更新日志
 
+### 2026-04-07
+- 新增输出框快捷键：上下滚动（Alt+↑/↓）、清空输入（Alt+Del）、删除字符（Alt+Backspace）
+- 输出框 Markdown 渲染和代码高亮可独立开关
+- 代码块使用 JetBrains Mono 等宽字体
+- 等待回答时 Sparkle 图标呼吸动画与渐变边框跑马灯效果
+- 非激活窗口快捷键优化：避免快捷键被输入框误接收
+
 ### 2026-04-06
 - 新增超轻量本地 RAG 模块：基于 Markdown 分块 + 混合检索（向量 + FTS5），支持参考来源点击跳转
 - 新增 OCR 智能段落缝合：自动处理硬回车，优化大模型输入质量

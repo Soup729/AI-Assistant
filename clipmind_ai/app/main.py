@@ -119,6 +119,11 @@ class AppController(QObject):
         self.hotkey_thread.trigger_screenshot_signal.connect(self.handle_screenshot)
         self.hotkey_thread.trigger_speech_signal.connect(self.toggle_speech_recording)
         self.hotkey_thread.trigger_paste_signal.connect(self.paste_result)
+        self.hotkey_thread.trigger_send_signal.connect(self.handle_send_request)
+        self.hotkey_thread.trigger_scroll_up_signal.connect(self.main_window.scroll_output_up)
+        self.hotkey_thread.trigger_scroll_down_signal.connect(self.main_window.scroll_output_down)
+        self.hotkey_thread.trigger_clear_input_signal.connect(self.main_window.clear_input)
+        self.hotkey_thread.trigger_delete_char_signal.connect(self.main_window.delete_char)
 
         self.main_window.btn_settings.clicked.connect(self.show_settings_window)
         self.main_window.btn_send.clicked.connect(self.handle_send_request)
@@ -134,10 +139,14 @@ class AppController(QObject):
         self.ocr_status_signal.connect(self.main_window.set_ocr_status)
 
         self.ai_request_started_signal.connect(self._on_ai_request_started)
+        self.ai_request_started_signal.connect(self.main_window.start_thinking_animation)
+        self.ai_request_started_signal.connect(self.main_window.start_flow_animation)
         self.ai_chunk_signal.connect(self._on_ai_chunk_received)
         self.ai_chunk_signal.connect(self.main_window.append_output)
         self.ai_status_signal.connect(self.main_window.set_response_status)
         self.ai_finished_signal.connect(self._on_ai_finished)
+        self.ai_finished_signal.connect(self.main_window.stop_thinking_animation)
+        self.ai_finished_signal.connect(self.main_window.stop_flow_animation)
 
         self.speech_partial_signal.connect(self._on_speech_partial)
         self.speech_finished_signal.connect(self._on_speech_finished)
@@ -157,6 +166,9 @@ class AppController(QObject):
         def _done_callback(done_task: asyncio.Task):
             self._pending_tasks.discard(done_task)
             if done_task.cancelled():
+                # 任务被取消时，也要停止流光和思考动画
+                self.main_window.stop_flow_animation()
+                self.main_window.stop_thinking_animation()
                 return
             with suppress(asyncio.CancelledError):
                 exc = done_task.exception()
@@ -206,15 +218,13 @@ class AppController(QObject):
             return False
 
     def _show_main_window(self):
+        # 仅调用 show()，依赖 WA_ShowWithoutActivating 属性显示而不抢夺焦点
         self.main_window.show()
-        self.main_window.raise_()
-        self.main_window.activateWindow()
 
     @Slot()
     def show_settings_window(self):
+        # 仅调用 show()，不调用 raise_()/activateWindow() 以避免抢夺焦点
         self.settings_window.show()
-        self.settings_window.raise_()
-        self.settings_window.activateWindow()
 
     @Slot()
     def toggle_main_window(self):
@@ -580,11 +590,13 @@ class AppController(QObject):
 
         if success:
             if payload.strip():
+                # 渲染 Markdown（含代码高亮），替换流式输出的原始文本
+                self.main_window.render_markdown(payload)
+                self._append_source_tags()
                 self._create_task(
                     self._save_history_async(self._current_user_input, payload),
                     "写入会话历史",
                 )
-                self._append_source_tags()
                 self.main_window.set_response_status("生成完成")
             else:
                 self.main_window.set_response_status("模型未返回内容")

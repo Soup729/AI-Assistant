@@ -14,6 +14,11 @@ class HotkeyThread(QThread):
     trigger_screenshot_signal = Signal()
     trigger_speech_signal = Signal()
     trigger_paste_signal = Signal()
+    trigger_send_signal = Signal()
+    trigger_scroll_up_signal = Signal()
+    trigger_scroll_down_signal = Signal()
+    trigger_clear_input_signal = Signal()
+    trigger_delete_char_signal = Signal()
 
     def __init__(self):
         super().__init__()
@@ -26,6 +31,11 @@ class HotkeyThread(QThread):
             "screenshot": "alt+w",
             "speech": "alt+e",
             "paste": "alt+h",
+            "send": "alt+k",
+            "scroll_up": "alt+up",
+            "scroll_down": "alt+down",
+            "clear_input": "alt+del",
+            "delete_char": "alt+backspace",
         }
 
     def _normalize_hotkey(self, value: str) -> str:
@@ -74,6 +84,23 @@ class HotkeyThread(QThread):
                     self.trigger_speech_signal.emit,
                 ),
                 "paste": (getattr(cfg, "hotkey_paste", self._default_hotkeys["paste"]), self.trigger_paste_signal.emit),
+                "send": (getattr(cfg, "hotkey_send", self._default_hotkeys["send"]), self.trigger_send_signal.emit),
+                "scroll_up": (
+                    getattr(cfg, "hotkey_scroll_up", self._default_hotkeys["scroll_up"]),
+                    self.trigger_scroll_up_signal.emit,
+                ),
+                "scroll_down": (
+                    getattr(cfg, "hotkey_scroll_down", self._default_hotkeys["scroll_down"]),
+                    self.trigger_scroll_down_signal.emit,
+                ),
+                "clear_input": (
+                    getattr(cfg, "hotkey_clear_input", self._default_hotkeys["clear_input"]),
+                    self.trigger_clear_input_signal.emit,
+                ),
+                "delete_char": (
+                    getattr(cfg, "hotkey_delete_char", self._default_hotkeys["delete_char"]),
+                    self.trigger_delete_char_signal.emit,
+                ),
             }
 
             registered_keys: dict[str, str] = {}
@@ -108,6 +135,11 @@ class HotkeyThread(QThread):
                 f"screenshot={registered_keys.get('screenshot', '未注册')}, "
                 f"speech={registered_keys.get('speech', '未注册')}, "
                 f"paste={registered_keys.get('paste', '未注册')}, "
+                f"send={registered_keys.get('send', '未注册')}, "
+                f"scroll_up={registered_keys.get('scroll_up', '未注册')}, "
+                f"scroll_down={registered_keys.get('scroll_down', '未注册')}, "
+                f"clear_input={registered_keys.get('clear_input', '未注册')}, "
+                f"delete_char={registered_keys.get('delete_char', '未注册')}, "
                 f"total={len(self._hotkey_handles)}"
             )
 

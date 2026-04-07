@@ -1,10 +1,13 @@
-from PySide6.QtCore import Signal, Qt
+import keyboard
+
+from PySide6.QtCore import Signal, Qt, QEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,6 +33,222 @@ from app.utils.mica import (
 )
 
 
+class _HotkeyCapture(QFrame):
+    """支持直接按键捕获 + 冲突检测的快捷键输入组件。"""
+
+    hotkey_changed = Signal(str)  # 发出规范化后的快捷键字符串
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hotkey = ""          # 当前已确认的快捷键
+        self._saved_hotkey = ""     # 用于冲突时回滚
+        self._capturing = False
+        self._modifier_keys = set()
+
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFixedHeight(28)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+        self._label = QLabel("点击输入快捷键", self)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setStyleSheet("color: gray; background: transparent; border: none;")
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 0, 8, 0)
+        lay.addWidget(self._label)
+
+        self._apply_style(False)
+        self.installEventFilter(self)
+
+    # ── 公开 API ────────────────────────────────────────────────
+
+    def hotkey(self) -> str:
+        return self._hotkey
+
+    def set_hotkey(self, value: str):
+        """外部设置初始值（不从事件触发）。"""
+        self._hotkey = (value or "").strip().lower()
+        self._saved_hotkey = self._hotkey
+        self._label.setText(self._hotkey or "点击输入快捷键")
+        self._label.setStyleSheet("color: white; background: transparent; border: none;")
+        self._capturing = False
+        self._apply_style(False)
+
+    def set_revalidate_callback(self, fn):
+        """传入一个 (hotkey_str) -> bool 函数，用于检测同表单内冲突。"""
+        self._revalidate = fn
+
+    # ── 内部 ────────────────────────────────────────────────────
+
+    def _apply_style(self, capturing: bool):
+        if capturing:
+            self.setStyleSheet(
+                "QFrame { background: #1a3a2a; border: 1.5px solid #00b4d8; border-radius: 4px; }"
+            )
+            self._label.setStyleSheet("color: #00b4d8; background: transparent; border: none;")
+        else:
+            self.setStyleSheet(
+                "QFrame { background: #2a2a2a; border: 1px solid #444; border-radius: 4px; }"
+                "QFrame:hover { border: 1px solid #00b4d8; }"
+            )
+            self._label.setStyleSheet("color: white; background: transparent; border: none;")
+
+    def _start_capture(self):
+        self._capturing = True
+        self._modifier_keys = set()
+        self._label.setText("按下快捷键...")
+        self._apply_style(True)
+        self.setFocus()
+
+    def _finish_capture(self):
+        self._capturing = False
+        self._apply_style(False)
+
+    def _normalize_key(self, key: str) -> str:
+        key = key.lower().strip()
+        mappings = {
+            "control": "ctrl",
+            "caps lock": "capslock",
+            "num lock": "numlock",
+            "scroll lock": "scrolllock",
+            "print screen": "printscreen",
+            "backspace": "backspace",
+            "delete": "delete",
+            "insert": "insert",
+            "return": "enter",
+            "esc": "escape",
+            "left": "left",
+            "right": "right",
+            "up": "up",
+            "down": "down",
+            "space": "space",
+        }
+        return mappings.get(key, key)
+
+    def _build_hotkey_string(self, key_str: str) -> str:
+        parts = sorted(self._modifier_keys, key=lambda x: ["ctrl", "alt", "shift", "win"].index(x) if x in ["ctrl", "alt", "shift", "win"] else 99)
+        main = self._normalize_key(key_str)
+        if main not in ("ctrl", "alt", "shift", "win"):
+            parts.append(main)
+        return "+".join(parts)
+
+    def _attempt_register(self, hotkey: str) -> bool:
+        """尝试注册 hotkey，返回 True 表示成功（无冲突）。"""
+        try:
+            handle = keyboard.add_hotkey(hotkey, lambda: None, suppress=False)
+            keyboard.remove_hotkey(handle)
+            return True
+        except (keyboard.exceptions.RecordingException,
+                keyboard.exceptions.RegistrationException):
+            return False
+        except Exception:
+            return False
+
+    def _on_conflict(self, hotkey: str):
+        self._hotkey = self._saved_hotkey
+        self._label.setText(self._hotkey or "点击输入快捷键")
+        self._finish_capture()
+        QMessageBox.warning(
+            self.window(),
+            "快捷键冲突",
+            f"快捷键「{hotkey}」已被系统或其他应用占用，请换一个组合键。",
+        )
+
+    # ── 事件 ────────────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if not self._capturing:
+                self._start_capture()
+            return True
+
+        if event.type() == QEvent.Type.KeyPress and self._capturing:
+            key_event = event
+            key = key_event.key()
+
+            # Escape 取消
+            if key == Qt.Key_Escape:
+                self._hotkey = self._saved_hotkey
+                self._label.setText(self._hotkey or "点击输入快捷键")
+                self._finish_capture()
+                return True
+
+            # 忽略单独的功能键（无主键）
+            if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta,
+                       Qt.Key_CapsLock, Qt.Key_NumLock, Qt.Key_ScrollLock):
+                if key == Qt.Key_Control:
+                    self._modifier_keys.add("ctrl")
+                elif key == Qt.Key_Shift:
+                    self._modifier_keys.add("shift")
+                elif key == Qt.Key_Alt:
+                    self._modifier_keys.add("alt")
+                elif key == Qt.Key_Meta:
+                    self._modifier_keys.add("win")
+                return True
+
+            # 主键转字符串
+            if key == Qt.Key_Return or key == Qt.Key_Enter:
+                main = "enter"
+            elif key == Qt.Key_Space:
+                main = "space"
+            elif key == Qt.Key_Backspace:
+                main = "backspace"
+            elif key == Qt.Key_Tab:
+                main = "tab"
+            elif Qt.Key_F1 <= key <= Qt.Key_F25:
+                main = f"f{key - Qt.Key_F1 + 1}"
+            elif key in (Qt.Key_Left, Qt.Key_Up, Qt.Key_Right, Qt.Key_Down,
+                         Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp, Qt.Key_PageDown,
+                         Qt.Key_Insert, Qt.Key_Delete):
+                main = {Qt.Key_Left: "left", Qt.Key_Up: "up", Qt.Key_Right: "right",
+                        Qt.Key_Down: "down", Qt.Key_Home: "home", Qt.Key_End: "end",
+                        Qt.Key_PageUp: "page up", Qt.Key_PageDown: "page down",
+                        Qt.Key_Insert: "insert", Qt.Key_Delete: "delete"}[key]
+            else:
+                text = key_event.text()
+                if text:
+                    main = text.lower()
+                else:
+                    self._finish_capture()
+                    return True
+
+            # 缺少修饰键 → 视为无效
+            if not self._modifier_keys:
+                self._finish_capture()
+                return True
+
+            hotkey_str = self._build_hotkey_string(main)
+
+            # 检测同表单冲突（_revalidate 返回 False 表示冲突）
+            if hasattr(self, "_revalidate") and not self._revalidate(hotkey_str):
+                self._hotkey = self._saved_hotkey
+                self._label.setText(self._hotkey or "点击输入快捷键")
+                self._finish_capture()
+                QMessageBox.warning(
+                    self.window(),
+                    "快捷键重复",
+                    f"快捷键「{hotkey_str}」已被本页其他功能占用，请换一个组合键。",
+                )
+                return True
+
+            # 检测系统冲突（临时注册测试）
+            if not self._attempt_register(hotkey_str):
+                self._on_conflict(hotkey_str)
+                return True
+
+            # 有效 → 确认
+            self._hotkey = hotkey_str
+            self._saved_hotkey = hotkey_str
+            self._label.setText(hotkey_str)
+            self._label.setStyleSheet("color: white; background: transparent; border: none;")
+            self._finish_capture()
+            self.hotkey_changed.emit(hotkey_str)
+            return True
+
+        return super().eventFilter(obj, event)
+
+
 class SettingsWindow(QDialog):
     # scope: "model" | "template" | "hotkey" | "ocr" | "rag" | "speech" | "general"
     config_updated = Signal(str)
@@ -39,6 +258,8 @@ class SettingsWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ClipMind AI - 设置")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Dialog | Qt.Tool)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)  # 显示但不抢夺键盘焦点
         self.resize(760, 780)
 
         self._model_profiles = []
@@ -143,17 +364,51 @@ class SettingsWindow(QDialog):
         self.hotkey_tab = QWidget()
         form = QFormLayout(self.hotkey_tab)
 
-        self.edit_hk_main = QLineEdit()
-        self.edit_hk_selection = QLineEdit()
-        self.edit_hk_screenshot = QLineEdit()
-        self.edit_hk_speech = QLineEdit()
-        self.edit_hk_paste = QLineEdit()
+        # 所有热键捕获组件（用于同表单冲突检测）
+        self._hotkey_widgets = {}
+
+        self.edit_hk_main = _HotkeyCapture()
+        self.edit_hk_selection = _HotkeyCapture()
+        self.edit_hk_screenshot = _HotkeyCapture()
+        self.edit_hk_speech = _HotkeyCapture()
+        self.edit_hk_paste = _HotkeyCapture()
+        self.edit_hk_send = _HotkeyCapture()
+        self.edit_hk_scroll_up = _HotkeyCapture()
+        self.edit_hk_scroll_down = _HotkeyCapture()
+        self.edit_hk_clear_input = _HotkeyCapture()
+        self.edit_hk_delete_char = _HotkeyCapture()
+
+        self._hotkey_widgets = {
+            "hotkey_main": self.edit_hk_main,
+            "hotkey_selection": self.edit_hk_selection,
+            "hotkey_screenshot": self.edit_hk_screenshot,
+            "hotkey_speech": self.edit_hk_speech,
+            "hotkey_paste": self.edit_hk_paste,
+            "hotkey_send": self.edit_hk_send,
+            "hotkey_scroll_up": self.edit_hk_scroll_up,
+            "hotkey_scroll_down": self.edit_hk_scroll_down,
+            "hotkey_clear_input": self.edit_hk_clear_input,
+            "hotkey_delete_char": self.edit_hk_delete_char,
+        }
+
+        # 为每个组件注册同表单冲突检测
+        for exclude_key, exclude_wgt in self._hotkey_widgets.items():
+            exclude_wgt.set_revalidate_callback(
+                lambda hk, _ek=exclude_key, _ew=exclude_wgt: all(
+                    _w.hotkey() != hk for _k, _w in self._hotkey_widgets.items() if _k != _ek
+                )
+            )
 
         form.addRow("唤起窗口:", self.edit_hk_main)
         form.addRow("读取选中文本:", self.edit_hk_selection)
         form.addRow("截图 OCR:", self.edit_hk_screenshot)
         form.addRow("录音转文字:", self.edit_hk_speech)
         form.addRow("自动回填:", self.edit_hk_paste)
+        form.addRow("发送提问:", self.edit_hk_send)
+        form.addRow("上滑输出:", self.edit_hk_scroll_up)
+        form.addRow("下滑输出:", self.edit_hk_scroll_down)
+        form.addRow("清空输入:", self.edit_hk_clear_input)
+        form.addRow("删除字符:", self.edit_hk_delete_char)
         form.addRow("", QLabel("<font color='gray'>修改后通常无需重启即可生效。</font>"))
 
     def _build_template_tab(self):
@@ -198,6 +453,14 @@ class SettingsWindow(QDialog):
         self.check_search = QCheckBox("启用联网搜索（实验性）")
         self.edit_search_key = QLineEdit()
         self.edit_search_key.setPlaceholderText("Tavily/Bing API Key")
+
+        # 输出渲染设置
+        self.check_markdown_render = QCheckBox("启用 Markdown 渲染")
+        self.check_markdown_render.setToolTip("开启后，AI 回答将支持标题、列表、链接等 Markdown 格式")
+        self.check_code_highlight = QCheckBox("启用代码高亮")
+        self.check_code_highlight.setToolTip("开启后，代码块将使用语法高亮显示")
+        render_tip = QLabel("关闭渲染功能后，输出将以纯文本形式显示。")
+        render_tip.setStyleSheet("color: #666; font-size: 12px;")
 
         self.slider_bg_opacity = QSlider(Qt.Orientation.Horizontal)
         self.slider_bg_opacity.setRange(1, 255)
@@ -288,6 +551,9 @@ class SettingsWindow(QDialog):
 
         form.addRow(self.check_search)
         form.addRow("搜索 API Key:", self.edit_search_key)
+        form.addRow(self.check_markdown_render)
+        form.addRow(self.check_code_highlight)
+        form.addRow(render_tip)
         form.addRow("窗口材质:", self.combo_ui_material)
         form.addRow("背景透明度:", opacity_row)
         form.addRow(material_tip)
@@ -334,14 +600,21 @@ class SettingsWindow(QDialog):
         self.combo_ui_material.blockSignals(False)
 
     def _load_config(self):
-        self.edit_hk_main.setText(config.hotkey_main)
-        self.edit_hk_selection.setText(config.hotkey_selection)
-        self.edit_hk_screenshot.setText(config.hotkey_screenshot)
-        self.edit_hk_speech.setText(getattr(config, "hotkey_speech", "alt+e"))
-        self.edit_hk_paste.setText(getattr(config, "hotkey_paste", "alt+h"))
+        self.edit_hk_main.set_hotkey(config.hotkey_main)
+        self.edit_hk_selection.set_hotkey(config.hotkey_selection)
+        self.edit_hk_screenshot.set_hotkey(config.hotkey_screenshot)
+        self.edit_hk_speech.set_hotkey(getattr(config, "hotkey_speech", "alt+e"))
+        self.edit_hk_paste.set_hotkey(getattr(config, "hotkey_paste", "alt+h"))
+        self.edit_hk_send.set_hotkey(getattr(config, "hotkey_send", "alt+k"))
+        self.edit_hk_scroll_up.set_hotkey(getattr(config, "hotkey_scroll_up", "alt+up"))
+        self.edit_hk_scroll_down.set_hotkey(getattr(config, "hotkey_scroll_down", "alt+down"))
+        self.edit_hk_clear_input.set_hotkey(getattr(config, "hotkey_clear_input", "alt+del"))
+        self.edit_hk_delete_char.set_hotkey(getattr(config, "hotkey_delete_char", "alt+backspace"))
 
         self.check_search.setChecked(config.enable_search)
         self.edit_search_key.setText(config.search_api_key)
+        self.check_markdown_render.setChecked(getattr(config, "enable_markdown_render", True))
+        self.check_code_highlight.setChecked(getattr(config, "enable_code_highlight", True))
         material_index = self.combo_ui_material.findData(getattr(config, "ui_material", "none"))
         self.combo_ui_material.setCurrentIndex(max(0, material_index))
         self.slider_bg_opacity.setValue(int(getattr(config, "background_opacity", 255)))
@@ -585,13 +858,20 @@ class SettingsWindow(QDialog):
 
         # 收集新值
         new_values = {
-            "hotkey_main": self.edit_hk_main.text().strip(),
-            "hotkey_selection": self.edit_hk_selection.text().strip(),
-            "hotkey_screenshot": self.edit_hk_screenshot.text().strip(),
-            "hotkey_speech": self.edit_hk_speech.text().strip(),
-            "hotkey_paste": self.edit_hk_paste.text().strip(),
+            "hotkey_main": self.edit_hk_main.hotkey(),
+            "hotkey_selection": self.edit_hk_selection.hotkey(),
+            "hotkey_screenshot": self.edit_hk_screenshot.hotkey(),
+            "hotkey_speech": self.edit_hk_speech.hotkey(),
+            "hotkey_paste": self.edit_hk_paste.hotkey(),
+            "hotkey_send": self.edit_hk_send.hotkey(),
+            "hotkey_scroll_up": self.edit_hk_scroll_up.hotkey(),
+            "hotkey_scroll_down": self.edit_hk_scroll_down.hotkey(),
+            "hotkey_clear_input": self.edit_hk_clear_input.hotkey(),
+            "hotkey_delete_char": self.edit_hk_delete_char.hotkey(),
             "enable_search": self.check_search.isChecked(),
             "search_api_key": self.edit_search_key.text().strip(),
+            "enable_markdown_render": self.check_markdown_render.isChecked(),
+            "enable_code_highlight": self.check_code_highlight.isChecked(),
             "ui_material": self.combo_ui_material.currentData(),
             "background_opacity": self.slider_bg_opacity.value(),
             "ocr_engine": self.combo_ocr_engine.currentData(),
@@ -613,7 +893,7 @@ class SettingsWindow(QDialog):
         old_vals = old_config.model_dump()
 
         # 热键变更
-        if any(old_vals.get(k) != new_values[k] for k in ("hotkey_main", "hotkey_selection", "hotkey_screenshot", "hotkey_speech", "hotkey_paste")):
+        if any(old_vals.get(k) != new_values[k] for k in ("hotkey_main", "hotkey_selection", "hotkey_screenshot", "hotkey_speech", "hotkey_paste", "hotkey_send", "hotkey_scroll_up", "hotkey_scroll_down", "hotkey_clear_input", "hotkey_delete_char")):
             changed_scopes.add("hotkey")
         # 搜索设置变更
         if old_vals.get("enable_search") != new_values["enable_search"] or old_vals.get("search_api_key") != new_values["search_api_key"]:
