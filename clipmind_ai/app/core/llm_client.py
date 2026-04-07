@@ -160,12 +160,6 @@ class LLMClient:
                     await stream_ctx.__aexit__(None, None, None)
                 except Exception as e:
                     logger.warning(f"关闭流式上下文时异常: {e}")
-            elif response is not None:
-                try:
-                    response.close()
-                except Exception as e:
-                    logger.warning(f"关闭响应对象时异常: {e}")
-
             if client is not None:
                 try:
                     await client.aclose()
