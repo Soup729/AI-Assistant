@@ -75,15 +75,17 @@ class LLMClient:
         # 手动管理资源，不使用 stream() 上下文管理器
         # 这样可以更精确地控制清理时机
         client: httpx.AsyncClient | None = None
+        stream_ctx = None
         response: httpx.Response | None = None
         line_iter: AsyncGenerator[str, None] | None = None
 
         try:
             client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
-            response = await client.post(api_url, headers=headers, json=payload)
+            stream_ctx = client.stream("POST", api_url, headers=headers, json=payload)
+            response = await stream_ctx.__aenter__()
 
             if response.status_code != 200:
-                raw = response.text.encode() if isinstance(response.text, str) else response.text
+                raw = await response.aread()
                 error_msg = self._error_message_from_response(raw.decode(errors="ignore"), response.status_code)
                 logger.error(f"API 请求失败: {error_msg}")
                 yield f"Error: API 请求失败 ({error_msg})"
@@ -153,7 +155,15 @@ class LLMClient:
                 except Exception as e:
                     logger.warning(f"关闭行迭代器时异常: {e}")
 
-            if response is not None:
+            if stream_ctx is not None:
+                try:
+                    await stream_ctx.__aexit__(None, None, None)
+                except RuntimeError as e:
+                    if "no running event loop" not in str(e):
+                        logger.warning(f"关闭流式上下文时异常: {e}")
+                except Exception:
+                    pass
+            elif response is not None:
                 try:
                     response.close()
                 except Exception:
