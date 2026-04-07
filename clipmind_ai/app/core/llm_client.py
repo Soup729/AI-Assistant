@@ -163,8 +163,8 @@ class LLMClient:
             elif response is not None:
                 try:
                     response.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"关闭响应对象时异常: {e}")
 
             if client is not None:
                 try:
