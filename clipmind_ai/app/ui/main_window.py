@@ -363,18 +363,20 @@ class MainWindow(QMainWindow):
         self.combo_model.blockSignals(False)
 
     def append_output(self, text: str):
-        cursor = self.output_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(text)
-        self.output_text.setTextCursor(cursor)
-        self.output_text.ensureCursorVisible()
+        scrollbar = self.output_text.verticalScrollBar()
+        previous_scroll = scrollbar.value()
+        end_cursor = QTextCursor(self.output_text.document())
+        end_cursor.movePosition(QTextCursor.End)
+        end_cursor.insertText(text)
+        scrollbar.setValue(previous_scroll)
 
     def append_output_html(self, html: str):
-        cursor = self.output_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertHtml(html)
-        self.output_text.setTextCursor(cursor)
-        self.output_text.ensureCursorVisible()
+        scrollbar = self.output_text.verticalScrollBar()
+        previous_scroll = scrollbar.value()
+        end_cursor = QTextCursor(self.output_text.document())
+        end_cursor.movePosition(QTextCursor.End)
+        end_cursor.insertHtml(html)
+        scrollbar.setValue(previous_scroll)
 
     def get_output_text(self) -> str:
         return self.output_text.toPlainText()
