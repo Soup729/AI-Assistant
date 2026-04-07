@@ -159,10 +159,9 @@ class LLMClient:
                 try:
                     await stream_ctx.__aexit__(None, None, None)
                 except RuntimeError as e:
-                    if "no running event loop" not in str(e):
-                        logger.warning(f"关闭流式上下文时异常: {e}")
-                except Exception:
-                    pass
+                    logger.warning(f"关闭流式上下文时异常: {e}")
+                except Exception as e:
+                    logger.warning(f"关闭流式上下文时异常: {e}")
             elif response is not None:
                 try:
                     response.close()
